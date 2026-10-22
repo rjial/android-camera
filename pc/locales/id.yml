@@ -1,4 +1,4 @@
-# ACAM PC app, Bahasa Indonesia. Kunci dan %{placeholder} harus sama dengan en.yml.
+# ACAM PC app, Indonesian. Keys and %{placeholder}s must match en.yml.
 _version: 1
 language.name: "Bahasa Indonesia"
 
@@ -115,7 +115,7 @@ wb.fluorescent: "Neon"
 wb.warm-fluorescent: "Neon hangat"
 wb.twilight: "Senja"
 
-# Digambar dengan font A-Z bawaan: hanya huruf kapital A-Z dan spasi.
+# Drawn with a built-in A-Z font: capital letters A-Z and spaces only.
 nosignal.title: "NO SIGNAL"
 nosignal.disconnected: "HP TERPUTUS"
 nosignal.lost: "SINYAL HILANG"

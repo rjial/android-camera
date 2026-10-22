@@ -66,7 +66,7 @@ class StreamService : Service() {
                 onMessage = { m -> StreamState.update { it.copy(message = m) } },
             ).also { it.start() }
         } catch (e: Exception) {
-            Log.e(TAG, "server gagal start", e)
+            Log.e(TAG, "server failed to start", e)
             StreamState.update { it.copy(message = getString(R.string.port_failed, Protocol.TCP_PORT, e.message ?: "")) }
             stopSelf()
             return START_NOT_STICKY

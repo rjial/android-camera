@@ -1,43 +1,43 @@
 # TODO
 
-## Build target Windows dan macOS
+## Windows and macOS build targets
 
-Saat ini aplikasi PC `acam` dan plugin OBS hanya untuk Linux. Aplikasi Android tidak terpengaruh.
-Yang sudah lintas platform: GUI (gpui + gpui-component), decode H.264 (openh264), koneksi Wi-Fi (TCP/UDP), terjemahan,
-dan kontrol kamera. Yang masih khusus Linux tercantum di bawah.
+The `acam` PC app and the OBS plugin are Linux-only for now. The Android app is not affected.
+Already cross-platform: the GUI (gpui + gpui-component), H.264 decoding (openh264), the Wi-Fi connection (TCP/UDP),
+translations and camera controls. What is still Linux-specific is listed below.
 
-### Bersama (Windows dan macOS)
+### Shared (Windows and macOS)
 
-- [ ] Pisahkan kode khusus Linux di balik `#[cfg(target_os = "linux")]`: `v4l2out.rs`, `libc::clock_gettime`/`getuid`
-      di `share.rs`, dan path socket `$XDG_RUNTIME_DIR`.
-- [ ] Jadikan output webcam virtual sebuah trait (`VirtualCamera`) dengan satu implementasi per OS; v4l2loopback jadi
-      implementasi Linux.
-- [ ] Ganti transport ke plugin OBS: unix socket di Linux/macOS, named pipe `\\.\pipe\acam-video` di Windows
-      (atau AF_UNIX, yang ada sejak Windows 10 1803). Format `ACVF` tetap sama.
-- [ ] Jam untuk `pts_ns` harus sama dengan `os_gettime_ns()` OBS: `QueryPerformanceCounter` di Windows,
-      `mach_absolute_time` di macOS.
-- [ ] Lokasi file bahasa yang disimpan: `%APPDATA%\acam\language` (Windows), `~/Library/Application Support/acam/language` (macOS).
-- [ ] Tambah job Windows dan macOS di `.github/workflows/ci.yml` dan `release.yml` (matrix), beserta nama artefaknya.
-- [ ] Uji USB (Android Open Accessory) lewat libusb di kedua OS.
+- [ ] Put Linux-only code behind `#[cfg(target_os = "linux")]`: `v4l2out.rs`, `libc::clock_gettime`/`getuid`
+      in `share.rs`, and the `$XDG_RUNTIME_DIR` socket path.
+- [ ] Turn the virtual webcam output into a trait (`VirtualCamera`) with one implementation per OS; v4l2loopback becomes
+      the Linux implementation.
+- [ ] Replace the transport to the OBS plugin: unix socket on Linux/macOS, named pipe `\\.\pipe\acam-video` on Windows
+      (or AF_UNIX, available since Windows 10 1803). The `ACVF` format stays the same.
+- [ ] The `pts_ns` clock must match OBS's `os_gettime_ns()`: `QueryPerformanceCounter` on Windows,
+      `mach_absolute_time` on macOS.
+- [ ] Location of the saved language file: `%APPDATA%\acam\language` (Windows), `~/Library/Application Support/acam/language` (macOS).
+- [ ] Add Windows and macOS jobs to `.github/workflows/ci.yml` and `release.yml` (matrix), with their artifact names.
+- [ ] Test USB (Android Open Accessory) through libusb on both OSes.
 
 ### Windows
 
-- [ ] Webcam virtual: Media Foundation virtual camera (`MFCreateVirtualCamera`, Windows 11) sebagai pilihan utama;
-      untuk Windows 10 perlu filter DirectShow (atau arahkan pengguna ke OBS Virtual Camera lewat plugin).
-- [ ] USB: Windows tidak mengizinkan libusb membuka HP tanpa driver WinUSB. Dokumentasikan Zadig, atau sediakan
-      installer driver untuk VID/PID accessory `18d1:2d00`/`2d01`.
-- [ ] Discovery UDP: izin Windows Firewall untuk port 5000/5001 saat pertama kali dijalankan.
-- [ ] Build: target `x86_64-pc-windows-msvc`, ikon dan metadata `.exe`, lalu installer (MSI lewat `cargo-wix`, atau zip).
-- [ ] Plugin OBS: build `.dll` dengan SDK OBS Windows (obs-deps + obs-studio), install ke
+- [ ] Virtual webcam: a Media Foundation virtual camera (`MFCreateVirtualCamera`, Windows 11) as the main option;
+      Windows 10 needs a DirectShow filter (or point users to the OBS Virtual Camera through the plugin).
+- [ ] USB: Windows does not let libusb open the phone without a WinUSB driver. Document Zadig, or ship a driver
+      installer for the accessory VID/PID `18d1:2d00`/`2d01`.
+- [ ] UDP discovery: Windows Firewall permission for ports 5000/5001 on first run.
+- [ ] Build: target `x86_64-pc-windows-msvc`, `.exe` icon and metadata, then an installer (MSI via `cargo-wix`, or a zip).
+- [ ] OBS plugin: build a `.dll` with the Windows OBS SDK (obs-deps + obs-studio), install to
       `%ProgramData%\obs-studio\plugins\acam-source\`.
 
 ### macOS
 
-- [ ] Webcam virtual: Camera Extension CoreMediaIO (macOS 12.3+). Butuh app bundle, entitlement system extension,
-      dan Developer ID untuk signing; ini bagian terbesar.
-- [ ] USB: AOA lewat libusb seharusnya jalan tanpa driver; pastikan tidak bentrok dengan Android File Transfer.
-- [ ] Build: universal binary (`aarch64-apple-darwin` + `x86_64-apple-darwin`, lewat `lipo`), `.app` bundle,
-      lalu signing dan notarization (`.dmg`).
-- [ ] Plugin OBS: build `.plugin` bundle (universal) dengan SDK OBS macOS, install ke
+- [ ] Virtual webcam: a CoreMediaIO Camera Extension (macOS 12.3+). Needs an app bundle, the system extension
+      entitlement and a Developer ID for signing; this is the largest piece.
+- [ ] USB: AOA through libusb should work without a driver; make sure it does not clash with Android File Transfer.
+- [ ] Build: universal binary (`aarch64-apple-darwin` + `x86_64-apple-darwin`, via `lipo`), an `.app` bundle,
+      then signing and notarization (`.dmg`).
+- [ ] OBS plugin: build a universal `.plugin` bundle with the macOS OBS SDK, install to
       `~/Library/Application Support/obs-studio/plugins/`.
-- [ ] Izin kamera/jaringan lokal: macOS 15 meminta izin "Local Network" untuk discovery UDP.
+- [ ] Permissions: macOS 15 asks for "Local Network" permission for UDP discovery.

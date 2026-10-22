@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Bahasa Indonesia. Nama string dan placeholder (%1$s, %1$d) harus sama dengan values/strings.xml. -->
+<!-- Indonesian. String names and placeholders (%1$s, %1$d) must match values/strings.xml. -->
 <resources>
     <string name="tagline">Kamera HP sebagai webcam PC. Preview tampil di aplikasi PC.</string>
     <string name="start">Start</string>

@@ -125,7 +125,7 @@ class AcamServer(
                 try {
                     enc.start(hello.width, hello.height, hello.fps, hello.bitrateKbps, hello.camera == 1)
                 } catch (e: Exception) {
-                    Log.e(TAG, "kamera/encoder gagal", e)
+                    Log.e(TAG, "camera/encoder failed", e)
                     return reject(Protocol.STATUS_CAMERA_FAILED, context.getString(R.string.reject_camera, e.message ?: ""))
                 }
                 synchronized(out) { out.writeConfig(Protocol.STATUS_OK, enc.size.width, enc.size.height, enc.fps) }
@@ -138,7 +138,7 @@ class AcamServer(
                 readLoop(input, enc)
             } catch (e: Exception) {
                 // Any failure (network, camera, codec) ends only this session, never the app.
-                if (!closed) Log.i(TAG, "sesi $peer selesai: $e")
+                if (!closed) Log.i(TAG, "session $peer ended: $e")
             } finally {
                 close()
             }
@@ -149,7 +149,7 @@ class AcamServer(
         )
 
         private fun reject(status: Int, reason: String) {
-            Log.w(TAG, "menolak $peer: $reason")
+            Log.w(TAG, "rejecting $peer: $reason")
             onMessage(context.getString(R.string.rejected, peer, reason))
             synchronized(out) { out.writeConfig(status, 0, 0, 0) }
         }
@@ -163,7 +163,7 @@ class AcamServer(
                     Protocol.T_PONG -> {}
                     Protocol.T_SET_CONTROLS -> enc.setControls(Tlv.decode(p.payload))
                     Protocol.T_BYE -> {
-                        Log.i(TAG, "$peer menutup sesi")
+                        Log.i(TAG, "$peer closed the session")
                         close()
                     }
                     Protocol.T_REQ_KEYFRAME -> enc.requestKeyframe()
@@ -176,7 +176,7 @@ class AcamServer(
                         enc.switchCamera()
                         publish(enc)
                     }
-                    else -> Log.w(TAG, "paket 0x${p.type.toString(16)} diabaikan")
+                    else -> Log.w(TAG, "packet 0x${p.type.toString(16)} ignored")
                 }
             }
         }
@@ -185,7 +185,7 @@ class AcamServer(
             try {
                 while (!closed) {
                     if (System.currentTimeMillis() - lastRxMs > IDLE_TIMEOUT_MS) {
-                        Log.i(TAG, "$peer diam lebih dari ${IDLE_TIMEOUT_MS / 1000} detik, sesi ditutup")
+                        Log.i(TAG, "$peer idle for more than ${IDLE_TIMEOUT_MS / 1000} s, closing the session")
                         close()
                         break
                     }
@@ -193,7 +193,7 @@ class AcamServer(
                     send(p)
                 }
             } catch (e: IOException) {
-                if (!closed) Log.i(TAG, "kirim ke $peer gagal: $e")
+                if (!closed) Log.i(TAG, "send to $peer failed: $e")
                 close()
             } catch (_: InterruptedException) {}
         }

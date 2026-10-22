@@ -128,7 +128,7 @@ fun syncToMagic(input: DataInputStream) {
             b == m[0] -> 1
             else -> 0
         }
-        if (++skipped > 1_000_000) throw IOException("bukan klien ACAM")
+        if (++skipped > 1_000_000) throw IOException("not an ACAM client")
     }
 }
 
@@ -160,7 +160,7 @@ class Packet(val type: Int, val flags: Int, val ptsUs: Long, val payload: ByteAr
             val type = input.readUnsignedByte()
             val flags = input.readUnsignedByte()
             val len = input.readInt()
-            if (len < 0 || len > Protocol.MAX_PAYLOAD) throw IOException("payload $len byte tidak valid")
+            if (len < 0 || len > Protocol.MAX_PAYLOAD) throw IOException("invalid payload of $len bytes")
             val pts = input.readLong()
             val payload = ByteArray(len)
             input.readFully(payload)

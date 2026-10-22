@@ -2,7 +2,7 @@
 # Project version (semver) lives in VERSION; Gradle and CMake read it directly, Cargo needs a copy.
 #   scripts/version.sh                 print the version
 #   scripts/version.sh check [vX.Y.Z]  fail if pc/Cargo.toml (or the given tag) disagrees with VERSION
-#   scripts/version.sh bump X.Y.Z      set the version everywhere and open a CHANGELOG section
+#   scripts/version.sh bump X.Y.Z      set the version everywhere and turn [Unreleased] into a CHANGELOG section
 set -eu
 cd "$(dirname "$0")/.."
 version=$(tr -d '[:space:]' < VERSION)
@@ -30,8 +30,14 @@ bump)
     sed -i "0,/^version = \".*\"/s//version = \"$new\"/" pc/Cargo.toml
     # Keep Cargo.lock in step without touching dependency versions.
     sed -i "/^name = \"acam\"$/{n;s/^version = \".*\"/version = \"$new\"/}" pc/Cargo.lock
+    # Turn the [Unreleased] section into the new version and open a fresh one above it.
     if ! grep -q "^## \[$new\]" CHANGELOG.md; then
-        sed -i "0,/^## \[/s//## [$new] - $(date +%Y-%m-%d)\n\n### Changed\n\n- \n\n## [/" CHANGELOG.md
+        if grep -q '^## \[Unreleased\]' CHANGELOG.md; then
+            sed -i "s/^## \[Unreleased\]$/## [Unreleased]\n\n## [$new] - $(date +%Y-%m-%d)/" CHANGELOG.md
+        else
+            sed -i "0,/^## \[/s//## [Unreleased]\n\n## [$new] - $(date +%Y-%m-%d)\n\n### Changed\n\n- \n\n## [/" CHANGELOG.md
+        fi
+        sed -i "s|^\[Unreleased\]: .*|[Unreleased]: https://github.com/rjial/android-camera/compare/v$new...HEAD\n[$new]: https://github.com/rjial/android-camera/releases/tag/v$new|" CHANGELOG.md
     fi
     echo "version set to $new; fill in CHANGELOG.md, commit, then: git tag v$new && git push origin v$new"
     ;;

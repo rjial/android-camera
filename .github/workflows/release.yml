@@ -163,16 +163,16 @@ jobs:
           ' CHANGELOG.md > notes.md
           cat >> notes.md <<'NOTES'
 
-          ## Unduhan / Downloads
+          ## Downloads
 
-          | File | Isi |
+          | File | Contents |
           |---|---|
-          | `acam-*-linux-x86_64.tar.gz` | Aplikasi PC `acam` (GUI + `--headless`) untuk Linux x86_64 |
-          | `acam-*.apk` | Aplikasi Android (Android 7.0+) |
-          | `acam-obs-plugin-*-linux-x86_64.tar.gz` | Plugin OBS "ACAM Camera"; ekstrak ke `~/.config/obs-studio/plugins/` |
-          | `SHA256SUMS` | Checksum semua file |
+          | `acam-*-linux-x86_64.tar.gz` | `acam` PC app (GUI + `--headless`) for Linux x86_64 |
+          | `acam-*.apk` | Android app (Android 7.0+) |
+          | `acam-obs-plugin-*-linux-x86_64.tar.gz` | "ACAM Camera" OBS plugin; extract into `~/.config/obs-studio/plugins/` |
+          | `SHA256SUMS` | Checksums of all files |
 
-          Cara pasang dan pakai ada di [README](https://github.com/${{ github.repository }}/blob/${{ env.TAG }}/README.md).
+          Installation and usage: see the [README](https://github.com/${{ github.repository }}/blob/${{ env.TAG }}/README.md).
           NOTES
           (cd dist && sha256sum * > SHA256SUMS)
           ls -la dist

@@ -98,7 +98,7 @@ class CameraEncoder(private val context: Context, private val sink: EncoderSink)
             throw e as? IOException ?: IOException(e)
         }
         sink.onCapabilities(controls!!.capabilities())
-        Log.i(TAG, "streaming kamera $cameraId ${size.width}x${size.height} @ ${this.fps} fps, ${this.bitrateKbps} kbps")
+        Log.i(TAG, "streaming camera $cameraId ${size.width}x${size.height} @ ${this.fps} fps, ${this.bitrateKbps} kbps")
     }
 
     fun stop() {
@@ -157,7 +157,7 @@ class CameraEncoder(private val context: Context, private val sink: EncoderSink)
                 }
             } catch (e: Exception) {
                 // Some vendors reject particular combinations; go back to the last request that worked.
-                Log.w(TAG, "kontrol ditolak kamera: $e")
+                Log.w(TAG, "camera rejected controls: $e")
                 c.restore(previous)
                 try {
                     c.applyTo(b)
@@ -207,10 +207,10 @@ class CameraEncoder(private val context: Context, private val sink: EncoderSink)
             val codec = MediaCodec.createByCodecName(info.name)
             try {
                 codec.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
-                Log.i(TAG, "encoder ${info.name} ${size.width}x${size.height}, opsi tingkat $level")
+                Log.i(TAG, "encoder ${info.name} ${size.width}x${size.height}, option level $level")
                 return codec
             } catch (e: Exception) {
-                Log.w(TAG, "configure ${info.name} tingkat $level gagal: $e")
+                Log.w(TAG, "configure ${info.name} level $level failed: $e")
                 codec.release()
                 lastError = e
             }

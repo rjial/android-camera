@@ -46,7 +46,7 @@ class UsbLink(private val context: Context, private val server: AcamServer) {
                 if (!sleep(500)) return
                 continue
             }
-            Log.i(TAG, "accessory dibuka, menunggu handshake dari PC")
+            Log.i(TAG, "accessory opened, waiting for the PC handshake")
             server.attach(
                 FileInputStream(pfd.fileDescriptor),
                 FileOutputStream(pfd.fileDescriptor),
