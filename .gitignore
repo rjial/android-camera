@@ -1,0 +1,19 @@
+# Build output
+/pc/target/
+/obs-plugin/build/
+/dist/
+
+# Android (also see android/.gitignore)
+/android/.gradle/
+/android/build/
+/android/app/build/
+/android/local.properties
+/android/keystore.properties
+*.jks
+*.keystore
+
+# Editors / OS
+.idea/
+.vscode/
+*.swp
+.DS_Store

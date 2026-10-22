@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- English, the default and fallback. To add a language, copy this file to res/values-<code>/strings.xml
+     (e.g. values-de, values-pt-rBR) and translate it; keep every %1$s / %1$d placeholder. -->
+<resources>
+    <string name="app_name" translatable="false">ACAM</string>
+    <string name="tagline">Phone camera as a PC webcam. The preview shows in the PC app.</string>
+    <string name="start">Start</string>
+    <string name="stop">Stop</string>
+    <string name="status_stopped">Stopped</string>
+    <string name="status_stopped_detail">Press Start so the PC can connect.</string>
+    <string name="status_waiting">Waiting for the PC</string>
+    <string name="status_waiting_detail">Connect from the ACAM app on the PC over Wi-Fi or USB.</string>
+    <string name="connected_usb">Connected over USB</string>
+    <string name="connected_wifi">Connected over Wi-Fi</string>
+    <string name="session_pc">PC %1$s</string>
+    <string name="session_detail">%1$dx%2$d @ %3$d fps · %4$s camera</string>
+    <string name="camera_front">front</string>
+    <string name="camera_back">back</string>
+    <string name="wifi" translatable="false">Wi-Fi</string>
+    <string name="usb" translatable="false">USB</string>
+    <string name="no_network">No active network</string>
+    <string name="token">Token</string>
+    <string name="usb_hint">Plug a data cable into the PC, then pick USB in the ACAM PC app (or run acam --usb). No token or ADB needed.</string>
+    <string name="camera_permission_needed">Camera permission is required</string>
+    <string name="usb_unplugged">USB cable unplugged</string>
+    <string name="port_failed">Could not open port %1$d: %2$s</string>
+    <string name="notification_channel">Camera streaming</string>
+    <string name="notification_title">ACAM active</string>
+    <string name="notification_text">The PC can reach the camera over Wi-Fi (port %1$d) or USB</string>
+    <string name="rejected">Rejected %1$s: %2$s</string>
+    <string name="reject_version">protocol version %1$d</string>
+    <string name="reject_token">wrong token</string>
+    <string name="reject_camera">camera: %1$s</string>
+    <string name="err_no_camera">no camera</string>
+    <string name="err_no_stream_map">camera has no stream configuration map</string>
+    <string name="err_no_size">no resolution supported by both the camera and the encoder</string>
+    <string name="err_no_encoder">no H.264 encoder</string>
+    <string name="err_encoder_rejected">encoder %1$s rejected %2$dx%3$d</string>
+    <string name="err_camera_timeout">timed out opening the camera</string>
+    <string name="err_session_failed">capture session configuration failed</string>
+    <string name="err_camera_disconnected">camera disconnected</string>
+    <string name="err_camera_error">camera error %1$d</string>
+</resources>

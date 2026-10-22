@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Bahasa Indonesia. Nama string dan placeholder (%1$s, %1$d) harus sama dengan values/strings.xml. -->
+<resources>
+    <string name="tagline">Kamera HP sebagai webcam PC. Preview tampil di aplikasi PC.</string>
+    <string name="start">Start</string>
+    <string name="stop">Stop</string>
+    <string name="status_stopped">Berhenti</string>
+    <string name="status_stopped_detail">Tekan Start agar PC bisa tersambung.</string>
+    <string name="status_waiting">Menunggu PC</string>
+    <string name="status_waiting_detail">Sambungkan dari aplikasi ACAM di PC lewat Wi-Fi atau USB.</string>
+    <string name="connected_usb">Terhubung via USB</string>
+    <string name="connected_wifi">Terhubung via Wi-Fi</string>
+    <string name="session_pc">PC %1$s</string>
+    <string name="session_detail">%1$dx%2$d @ %3$d fps · kamera %4$s</string>
+    <string name="camera_front">depan</string>
+    <string name="camera_back">belakang</string>
+    <string name="no_network">Tidak ada jaringan aktif</string>
+    <string name="token">Token</string>
+    <string name="usb_hint">Colok kabel data ke PC lalu pilih USB di aplikasi ACAM PC (atau jalankan acam --usb). Tidak perlu token atau ADB.</string>
+    <string name="camera_permission_needed">Izin kamera dibutuhkan</string>
+    <string name="usb_unplugged">Kabel USB dicabut</string>
+    <string name="port_failed">Gagal membuka port %1$d: %2$s</string>
+    <string name="notification_channel">Streaming kamera</string>
+    <string name="notification_title">ACAM aktif</string>
+    <string name="notification_text">Kamera bisa diakses PC lewat Wi-Fi (port %1$d) atau USB</string>
+    <string name="rejected">Menolak %1$s: %2$s</string>
+    <string name="reject_version">versi %1$d</string>
+    <string name="reject_token">token salah</string>
+    <string name="reject_camera">kamera: %1$s</string>
+    <string name="err_no_camera">tidak ada kamera</string>
+    <string name="err_no_stream_map">kamera tanpa stream configuration map</string>
+    <string name="err_no_size">tidak ada resolusi yang didukung kamera dan encoder</string>
+    <string name="err_no_encoder">tidak ada encoder H.264</string>
+    <string name="err_encoder_rejected">encoder %1$s menolak %2$dx%3$d</string>
+    <string name="err_camera_timeout">timeout membuka kamera</string>
+    <string name="err_session_failed">konfigurasi capture session gagal</string>
+    <string name="err_camera_disconnected">kamera terputus</string>
+    <string name="err_camera_error">kamera error %1$d</string>
+</resources>

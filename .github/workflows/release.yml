@@ -1,0 +1,188 @@
+name: Release
+
+# Push a tag like v0.2.0 (matching VERSION, see scripts/version.sh) to build and publish a GitHub Release.
+on:
+  push:
+    tags: ["v*.*.*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing tag to (re)build, e.g. v0.1.0
+        required: true
+
+permissions:
+  contents: write
+
+env:
+  TAG: ${{ inputs.tag || github.ref_name }}
+
+jobs:
+  version:
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+      - id: v
+        run: |
+          scripts/version.sh check "$TAG"
+          echo "version=$(scripts/version.sh)" >> "$GITHUB_OUTPUT"
+
+  pc:
+    name: acam (Linux x86_64)
+    needs: version
+    runs-on: ubuntu-22.04
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+      - name: System libraries for gpui
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends pkg-config libxcb1-dev libxkbcommon-dev \
+            libxkbcommon-x11-dev libx11-xcb-dev libxcb-xkb-dev libwayland-dev libvulkan-dev \
+            libfontconfig-dev libfreetype-dev libudev-dev
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: pc
+      - name: Test and build
+        working-directory: pc
+        run: |
+          cargo test --release --locked
+          cargo build --release --locked
+      - name: Package
+        run: |
+          name="acam-$VERSION-linux-x86_64"
+          mkdir -p "dist/$name"
+          cp pc/target/release/acam README.md CHANGELOG.md PROTOCOL.md "dist/$name/"
+          strip "dist/$name/acam"
+          tar -C dist -czf "dist/$name.tar.gz" "$name"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pc
+          path: dist/*.tar.gz
+
+  android:
+    name: Android APK
+    needs: version
+    runs-on: ubuntu-24.04
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+      - uses: gradle/actions/setup-gradle@v4
+      - name: Signing key
+        env:
+          KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+        run: |
+          if [ -z "$KEYSTORE_BASE64" ]; then
+            echo "::error::Secret ANDROID_KEYSTORE_BASE64 is missing; the release APK would be unsigned."
+            exit 1
+          fi
+          echo "$KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/acam-release.jks"
+          echo "ACAM_KEYSTORE_FILE=$RUNNER_TEMP/acam-release.jks" >> "$GITHUB_ENV"
+      - name: Build signed APK
+        working-directory: android
+        env:
+          ACAM_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ACAM_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ACAM_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: ./gradlew --no-daemon assembleRelease lintRelease
+      - name: Verify signature and package
+        run: |
+          apksigner=$(ls -d "$ANDROID_HOME"/build-tools/*/apksigner | sort -V | tail -n 1)
+          "$apksigner" verify --print-certs android/app/build/outputs/apk/release/app-release.apk
+          mkdir -p dist
+          cp android/app/build/outputs/apk/release/app-release.apk "dist/acam-$VERSION.apk"
+          rm -f "$RUNNER_TEMP/acam-release.jks"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: android
+          path: dist/*.apk
+
+  obs-plugin:
+    name: OBS plugin (Linux x86_64)
+    needs: version
+    runs-on: ubuntu-24.04
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+      - name: libobs headers
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends cmake libobs-dev
+      - name: Build and package
+        working-directory: obs-plugin
+        run: |
+          cmake -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_COMPILE_WARNING_AS_ERROR=ON \
+            -DACAM_PLUGIN_DIR="$PWD/stage/acam-source"
+          cmake --build build
+          cmake --install build --strip
+          mkdir -p ../dist
+          tar -C stage -czf "../dist/acam-obs-plugin-$VERSION-linux-x86_64.tar.gz" acam-source
+      - uses: actions/upload-artifact@v4
+        with:
+          name: obs-plugin
+          path: dist/*.tar.gz
+
+  publish:
+    name: GitHub Release
+    needs: [version, pc, android, obs-plugin]
+    runs-on: ubuntu-24.04
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Release notes from CHANGELOG.md
+        run: |
+          awk -v v="$VERSION" '
+            $0 ~ "^## \\[" v "\\]" { on = 1; next }
+            on && /^## \[/ { exit }
+            on && !/^\[[^]]+\]: / { print }
+          ' CHANGELOG.md > notes.md
+          cat >> notes.md <<'NOTES'
+
+          ## Unduhan / Downloads
+
+          | File | Isi |
+          |---|---|
+          | `acam-*-linux-x86_64.tar.gz` | Aplikasi PC `acam` (GUI + `--headless`) untuk Linux x86_64 |
+          | `acam-*.apk` | Aplikasi Android (Android 7.0+) |
+          | `acam-obs-plugin-*-linux-x86_64.tar.gz` | Plugin OBS "ACAM Camera"; ekstrak ke `~/.config/obs-studio/plugins/` |
+          | `SHA256SUMS` | Checksum semua file |
+
+          Cara pasang dan pakai ada di [README](https://github.com/${{ github.repository }}/blob/${{ env.TAG }}/README.md).
+          NOTES
+          (cd dist && sha256sum * > SHA256SUMS)
+          ls -la dist
+      - name: Publish
+        run: |
+          prerelease=""
+          case "$VERSION" in *-*) prerelease="--prerelease" ;; esac
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" dist/* --clobber
+            gh release edit "$TAG" --notes-file notes.md
+          else
+            gh release create "$TAG" dist/* --title "ACAM $TAG" --notes-file notes.md --verify-tag $prerelease
+          fi
