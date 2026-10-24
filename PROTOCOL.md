@@ -117,6 +117,8 @@ Local protocol between `acam` (server) and the OBS source plugin "ACAM Camera" (
 
 - **Socket:** unix stream at `$ACAM_SOCKET`, else `$XDG_RUNTIME_DIR/acam/video.sock`, else
   `/tmp/acam-<uid>/video.sock`. The folder is created with mode 0700 and the socket with 0600, so only the same user can read it.
+  On **Windows** it is a byte-mode named pipe at `$ACAM_SOCKET`, else `\\.\pipe\acam-video` (one instance per client, local
+  clients only, DACL: the same user and SYSTEM).
 - **Frame:** a 24-byte little-endian header, then tightly packed I420 (`w·h` bytes of Y, then `w/2·h/2` bytes of U, then V).
 
 | offset | size | content |
@@ -124,7 +126,7 @@ Local protocol between `acam` (server) and the OBS source plugin "ACAM Camera" (
 | 0 | 4 | magic `ACVF` |
 | 4 | 4 | width (u32) |
 | 8 | 4 | height (u32) |
-| 12 | 8 | `CLOCK_MONOTONIC` ns when acam sent it (u64), for measuring latency |
+| 12 | 8 | ns when acam sent it (u64) on OBS's `os_gettime_ns()` clock (`CLOCK_MONOTONIC`; QueryPerformanceCounter on Windows), for measuring latency |
 | 20 | 1 | color: 0 = BT.601, 1 = BT.709 |
 | 21 | 1 | range: 0 = limited |
 | 22 | 1 | idle frames only: reason (0 = phone disconnected, 1 = signal lost, 2 = OBS sharing off) |

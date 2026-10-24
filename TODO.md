@@ -12,10 +12,9 @@ translations and camera controls. What is still Linux-specific is listed below.
       in `share.rs`, and the `$XDG_RUNTIME_DIR` socket path.
 - [ ] Turn the virtual webcam output into a trait (`VirtualCamera`) with one implementation per OS; v4l2loopback becomes
       the Linux implementation.
-- [ ] Replace the transport to the OBS plugin: unix socket on Linux/macOS, named pipe `\\.\pipe\acam-video` on Windows
-      (or AF_UNIX, available since Windows 10 1803). The `ACVF` format stays the same.
-- [ ] The `pts_ns` clock must match OBS's `os_gettime_ns()`: `QueryPerformanceCounter` on Windows,
-      `mach_absolute_time` on macOS.
+- [x] Transport to the OBS plugin: unix socket on Linux/macOS, named pipe `\\.\pipe\acam-video` on Windows
+      (`share.rs`, `obs-plugin/src/acam-source.c`). The `ACVF` format stays the same.
+- [ ] The `pts_ns` clock must match OBS's `os_gettime_ns()`: done for Windows (QPC); `mach_absolute_time` on macOS.
 - [ ] Location of the saved language file: `%APPDATA%\acam\language` (Windows), `~/Library/Application Support/acam/language` (macOS).
 - [ ] Add Windows and macOS jobs to `.github/workflows/ci.yml` and `release.yml` (matrix), with their artifact names.
 - [ ] Test USB (Android Open Accessory) through libusb on both OSes.
@@ -71,8 +70,10 @@ Still to do:
 - [ ] UDP discovery: Windows Firewall permission for ports 5000/5001 on first run.
 - [ ] Build: `.exe` icon and metadata, then an installer (MSI via `cargo-wix`, or a zip) that also installs +
       registers the vcam-source DLL.
-- [ ] OBS plugin: build a `.dll` with the Windows OBS SDK; `FrameShare` is a no-op stub on Windows for now
-      (the `ACVF` transport needs a named pipe — see the Shared section).
+- [x] OBS plugin: `obs-plugin/build-windows.ps1` builds `acam-source.dll` with MSVC against the installed OBS
+      (libobs headers fetched for that exact version, import lib generated from `obs.dll`) and installs it to
+      `%ProgramData%\obs-studio\plugins\` without admin. Verified loading in OBS 32.2.2. acam serves it over
+      `\\.\pipe\acam-video` (user-only DACL). Still to do: build it in CI and ship it in the release.
 
 #### Struggles / hard-won lessons (so the next person doesn't repeat them)
 

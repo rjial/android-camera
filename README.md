@@ -49,6 +49,16 @@ cd obs-plugin && cmake -B build -DCMAKE_BUILD_TYPE=Release && cmake --build buil
 
 The plugin is installed to `~/.config/obs-studio/plugins/acam-source/` (`bin/64bit/acam-source.so` plus translations in `data/locale/`).
 
+On **Windows** (Visual Studio 2022 with the C++ workload, git and OBS installed; no CMake or OBS SDK needed), close OBS, then:
+
+```powershell
+obs-plugin\build-windows.ps1 -Install
+```
+
+It fetches the libobs headers matching the installed OBS version, builds `acam-source.dll` with MSVC and installs it to
+`%ProgramData%\obs-studio\plugins\acam-source\` (no admin needed). acam shares frames with it over the named pipe
+`\\.\pipe\acam-video`.
+
 ## Usage
 
 1. Load the v4l2loopback module (once per boot):
