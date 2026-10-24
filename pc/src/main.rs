@@ -128,7 +128,21 @@ fn main() -> Result<()> {
     if args.headless {
         headless(&args)
     } else {
+        #[cfg(windows)]
+        hide_own_console();
         gui::run(args)
+    }
+}
+
+/// acam is a console program (so `--headless` and `--help` work in a terminal), which makes Windows
+/// open a console window when the GUI is started from the Start menu or Explorer. Drop that window —
+/// but only if it was made for us, not when acam was started from a terminal.
+#[cfg(windows)]
+fn hide_own_console() {
+    use windows::Win32::System::Console::{FreeConsole, GetConsoleProcessList};
+    let mut pids = [0u32; 2];
+    if unsafe { GetConsoleProcessList(&mut pids) } == 1 {
+        let _ = unsafe { FreeConsole() };
     }
 }
 

@@ -321,9 +321,9 @@ mod tests {
     fn roundtrip(hardware: bool, (w, h): (usize, usize)) {
         let mut decoder = match MfDecoder::new(hardware) {
             Ok(d) => d,
-            // No GPU decoder on this machine (e.g. CI): nothing to test.
-            Err(e) if hardware => return eprintln!("skipping GPU decode test: {e:#}"),
-            Err(e) => panic!("{e:#}"),
+            // No GPU decoder on this machine, or no Media Foundation at all (Windows Server CI
+            // runners): nothing to test. Desktop Windows always has the software decoder.
+            Err(e) => return eprintln!("skipping {} decode test: {e:#}", if hardware { "GPU" } else { "CPU" }),
         };
         let mut encoder = Encoder::new().unwrap();
         let mut decoded = 0;

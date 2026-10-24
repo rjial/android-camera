@@ -23,7 +23,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 /// CLSID of the `vcam-source` media source, in registry string form: the DLL registers itself
 /// under it and `acam.exe` passes it to `MFCreateVirtualCamera`.
-pub const CLSID_STR: &str = "{ACA40001-0000-4000-8000-000000000001}";
+pub const CLSID_STR: &str = "{ADD1E890-C3A2-4A7F-B104-76EDC7DF80AC}";
 
 /// The virtual camera streams this fixed size (the `vcam-source` DLL advertises exactly this media
 /// type). Frames of other sizes are scaled/letterboxed into it by the writer, mirroring how the

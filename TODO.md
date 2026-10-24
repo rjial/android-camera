@@ -16,15 +16,16 @@ translations and camera controls. What is still Linux-specific is listed below.
       (`share.rs`, `obs-plugin/src/acam-source.c`). The `ACVF` format stays the same.
 - [ ] The `pts_ns` clock must match OBS's `os_gettime_ns()`: done for Windows (QPC); `mach_absolute_time` on macOS.
 - [ ] Location of the saved language file: `%APPDATA%\acam\language` (Windows), `~/Library/Application Support/acam/language` (macOS).
-- [ ] Add Windows and macOS jobs to `.github/workflows/ci.yml` and `release.yml` (matrix), with their artifact names.
+- [ ] Add macOS jobs to `.github/workflows/ci.yml` and `release.yml`. (Windows is done: `pc-windows` and
+      `obs-plugin-windows` in CI, the `windows` installer job in the release.)
 - [ ] Test USB (Android Open Accessory) through libusb on both OSes.
 
 ### Windows
 
 **Status: a working prototype exists on branch `windows-vcam-wip` (not merged).** The virtual camera
 shows live phone video in OBS (also through the ACAM Camera source), the Windows Camera app and browsers,
-without Administrator. GPU decode fixed the latency spiral on constrained hardware. What's left before merge:
-check the OBS plugin still builds on Linux, then packaging (installer, CI, release).
+without Administrator. GPU decode fixed the latency spiral on constrained hardware. There is an installer, and
+CI/release build it. What's left before merge: check the OBS plugin still builds on Linux (the CI job does that).
 
 What works on the branch:
 - [x] Foundation: Linux-only code behind `#[cfg(target_os = "linux")]`; `VirtualCamera` trait (`pc/src/webcam.rs`)
@@ -68,9 +69,17 @@ Still to do:
       the cost of not showing in the Windows Camera app — only if Win10 users ask.
 - [ ] Sign the accessory WinUSB INF (`pc/accessory-driver/`) so it installs without disabling driver-signature
       enforcement; or drop the AOA path entirely in favour of `--adb`.
-- [ ] UDP discovery: Windows Firewall permission for ports 5000/5001 on first run.
-- [ ] Build: `.exe` icon and metadata, then an installer (MSI via `cargo-wix`, or a zip) that also installs +
-      registers the vcam-source DLL.
+- [x] UDP discovery: the installer adds an inbound firewall rule for `acam.exe` (private and domain networks).
+- [x] Installer: `packaging/windows/build-installer.ps1` → Inno Setup `acam-<ver>-windows-x86_64-setup.exe`.
+      Installs `acam.exe` + `vcam_source.dll` to Program Files and registers the DLL (`regserver`), the OBS plugin
+      to `%ProgramData%\obs-studio\plugins` (optional component), Start menu entry, firewall rule; uninstall
+      removes all of it. A DLL the Frame Server still holds is replaced/removed at the next restart (Inno then
+      refuses a new install until that restart). Tested install, the camera tests against the installed DLL,
+      and uninstall. The CLSID is now a freshly generated one (`ADD1E890-…`).
+- [ ] `.exe` icon and version metadata (needs an `.ico`; e.g. the `winresource` crate in a build script).
+- [ ] Code-sign `acam.exe`, the DLLs and the installer so SmartScreen doesn't warn.
+- [ ] The GUI started from the Start menu frees its console window (`hide_own_console` in `main.rs`), which can
+      still flash briefly; a separate GUI-subsystem launcher would avoid even that.
 - [x] OBS plugin: `obs-plugin/build-windows.ps1` builds `acam-source.dll` with MSVC against the installed OBS
       (libobs headers fetched for that exact version, import lib generated from `obs.dll`) and installs it to
       `%ProgramData%\obs-studio\plugins\` without admin. Verified loading in OBS 32.2.2. acam serves it over

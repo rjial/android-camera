@@ -9,6 +9,10 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  # The Windows OBS plugin is built against this OBS (the oldest supported); keep in step with release.yml.
+  OBS_VERSION: "30.2.3"
+
 jobs:
   version:
     runs-on: ubuntu-24.04
@@ -38,6 +42,22 @@ jobs:
         working-directory: pc
         run: cargo build --release --locked
 
+  pc-windows:
+    name: acam (Windows)
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: pc
+      - name: Test
+        working-directory: pc
+        run: cargo test --release --locked --workspace
+      - name: Build
+        working-directory: pc
+        run: cargo build --release --locked --workspace
+
   android:
     name: Android APK
     runs-on: ubuntu-24.04
@@ -66,3 +86,18 @@ jobs:
         run: |
           cmake -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_COMPILE_WARNING_AS_ERROR=ON
           cmake --build build
+
+  obs-plugin-windows:
+    name: OBS plugin (Windows)
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+      # Built against the oldest OBS we support, so it also loads in newer ones.
+      - name: OBS ${{ env.OBS_VERSION }}
+        shell: pwsh
+        run: |
+          Invoke-WebRequest "https://github.com/obsproject/obs-studio/releases/download/$env:OBS_VERSION/OBS-Studio-$env:OBS_VERSION-Windows.zip" -OutFile "$env:RUNNER_TEMP\obs.zip"
+          Expand-Archive "$env:RUNNER_TEMP\obs.zip" "$env:RUNNER_TEMP\obs"
+      - name: Build
+        shell: pwsh
+        run: obs-plugin\build-windows.ps1 -ObsDir "$env:RUNNER_TEMP\obs"

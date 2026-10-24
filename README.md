@@ -1,4 +1,4 @@
-# ACAM: use an Android phone camera as a Linux webcam over Wi-Fi or USB
+# ACAM: use an Android phone camera as a Linux or Windows webcam over Wi-Fi or USB
 
 - `android/`: Kotlin app. Runs a TCP server on port 5000 and accepts USB connections (Android Open Accessory), encodes the camera to H.264, and announces itself on UDP 5001.
 - `pc/`: Rust app `acam` with a GUI (gpui): camera preview, Wi-Fi/USB connection panel, camera controls. Decodes H.264 (openh264) and writes to v4l2loopback. A CLI mode is available with `--headless`.
@@ -6,7 +6,9 @@
 - `obs-plugin/`: OBS source plugin "ACAM Camera" (C) that takes video from `acam` without v4l2loopback.
 - `PROTOCOL.md`: protocol specification. `CHANGELOG.md`: release history. `TODO.md`: roadmap (Windows, macOS).
 
-Only Linux x86_64 is supported on the PC side for now; Windows and macOS support is tracked in [TODO.md](TODO.md).
+The PC side runs on Linux x86_64 and Windows 10/11 x64 (the virtual webcam needs Windows 11; on Windows 10 use the OBS
+plugin). On Windows, `acam` decodes on the GPU (Media Foundation/DXVA) and the webcam is a Media Foundation virtual
+camera, "ACAM Camera". macOS support is tracked in [TODO.md](TODO.md).
 
 ## Install from a release
 
@@ -19,6 +21,11 @@ Download from [Releases](https://github.com/rjial/android-camera/releases/latest
   ```bash
   tar -xzf acam-obs-plugin-*-linux-x86_64.tar.gz -C ~/.config/obs-studio/plugins/
   ```
+- **Windows:** `acam-<version>-windows-x86_64-setup.exe`. It installs `acam` (Start menu: ACAM), registers the
+  "ACAM Camera" virtual webcam, adds a firewall rule for Wi-Fi discovery on private networks and, optionally, the OBS
+  plugin (OBS 30+). Installing needs Administrator once; running `acam` does not. The installer is not code-signed yet,
+  so SmartScreen may warn ("More info" → "Run anyway"). For USB, use the ADB tab (USB debugging on the phone and
+  [platform-tools](https://developer.android.com/tools/releases/platform-tools)).
 
 Verify the files with `sha256sum -c SHA256SUMS`.
 
@@ -35,6 +42,11 @@ PC app:
 ```bash
 cd pc && cargo build --release
 ```
+
+Windows installer (Rust, Visual Studio 2022 with the C++ workload, git, OBS and Inno Setup 6):
+`packaging\windows\build-installer.ps1` builds everything into `dist\acam-<version>-windows-x86_64-setup.exe`.
+For development without installing, `scripts\windows-vcam-register.ps1 -Register` (as Administrator) registers a
+debug build of the camera DLL.
 
 Dependency notes: `gpui 0.2.2` is paired with `gpui-component =0.5.1` (0.6+ uses a different gpui fork), and
 `libc` is pinned to 0.2.188 in `Cargo.lock` because 0.2.190+ removed `ENOATTR`, which a gpui dependency (`xattr`) uses.

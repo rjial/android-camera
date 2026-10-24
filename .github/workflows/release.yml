@@ -15,6 +15,8 @@ permissions:
 
 env:
   TAG: ${{ inputs.tag || github.ref_name }}
+  # The Windows OBS plugin is built against this OBS (the oldest supported); keep in step with ci.yml.
+  OBS_VERSION: "30.2.3"
 
 jobs:
   version:
@@ -66,6 +68,37 @@ jobs:
         with:
           name: pc
           path: dist/*.tar.gz
+
+  windows:
+    name: Windows installer (x86_64)
+    needs: version
+    runs-on: windows-2022
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: pc
+      - name: Test
+        working-directory: pc
+        run: cargo test --release --locked --workspace
+      - name: OBS ${{ env.OBS_VERSION }} and Inno Setup
+        shell: pwsh
+        run: |
+          Invoke-WebRequest "https://github.com/obsproject/obs-studio/releases/download/$env:OBS_VERSION/OBS-Studio-$env:OBS_VERSION-Windows.zip" -OutFile "$env:RUNNER_TEMP\obs.zip"
+          Expand-Archive "$env:RUNNER_TEMP\obs.zip" "$env:RUNNER_TEMP\obs"
+          choco install innosetup -y --no-progress
+      - name: Build installer
+        shell: pwsh
+        run: packaging\windows\build-installer.ps1 -ObsDir "$env:RUNNER_TEMP\obs"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: dist/*-setup.exe
 
   android:
     name: Android APK
@@ -141,7 +174,7 @@ jobs:
 
   publish:
     name: GitHub Release
-    needs: [version, pc, android, obs-plugin]
+    needs: [version, pc, windows, android, obs-plugin]
     runs-on: ubuntu-24.04
     env:
       VERSION: ${{ needs.version.outputs.version }}
@@ -168,6 +201,7 @@ jobs:
           | File | Contents |
           |---|---|
           | `acam-*-linux-x86_64.tar.gz` | `acam` PC app (GUI + `--headless`) for Linux x86_64 |
+          | `acam-*-windows-x86_64-setup.exe` | Windows installer: `acam`, the "ACAM Camera" virtual webcam (Windows 11) and the OBS plugin |
           | `acam-*.apk` | Android app (Android 7.0+) |
           | `acam-obs-plugin-*-linux-x86_64.tar.gz` | "ACAM Camera" OBS plugin; extract into `~/.config/obs-studio/plugins/` |
           | `SHA256SUMS` | Checksums of all files |
