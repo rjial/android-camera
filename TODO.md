@@ -22,14 +22,75 @@ translations and camera controls. What is still Linux-specific is listed below.
 
 ### Windows
 
-- [ ] Virtual webcam: a Media Foundation virtual camera (`MFCreateVirtualCamera`, Windows 11) as the main option;
-      Windows 10 needs a DirectShow filter (or point users to the OBS Virtual Camera through the plugin).
-- [ ] USB: Windows does not let libusb open the phone without a WinUSB driver. Document Zadig, or ship a driver
-      installer for the accessory VID/PID `18d1:2d00`/`2d01`.
+**Status: a working prototype exists on branch `windows-vcam-wip` (not merged).** The virtual camera
+shows live phone video in OBS, the Windows Camera app and browsers. The remaining blocker is latency on
+constrained hardware, not the camera itself. The branch still carries temporary debug instrumentation
+(decode/deliver timing in `engine.rs::receive`) that must be removed before merge.
+
+What works on the branch:
+- [x] Foundation: Linux-only code behind `#[cfg(target_os = "linux")]`; `VirtualCamera` trait (`pc/src/webcam.rs`)
+      with v4l2loopback as the Linux impl; cross-platform clock; `%APPDATA%\acam\language`; per-OS default device.
+      Builds on `x86_64-pc-windows-msvc`, `cargo test` green.
+- [x] Virtual webcam (Windows 11): `MFCreateVirtualCamera` with our own COM media source DLL
+      (`pc/vcam-source`), registered via `scripts/windows-vcam-register.ps1`. Shows up and streams.
+- [x] Real frames producer→DLL over `pc/vcam-ipc` (pagefile-backed `Global\` shared-memory section, seqlock,
+      fixed 1280x720 NV12). `acam.exe` must run **elevated** to create the `Global\` section.
+- [x] USB: works by tunnelling acam's existing TCP over USB with `adb forward tcp:5000 tcp:5000` then
+      `acam --headless --host 127.0.0.1` (scrcpy's approach — no AOA driver needed). An AOA WinUSB INF is in
+      `pc/accessory-driver/` as an alternative, but AOA-direct on Windows is fiddly (see struggles).
+
+Still to do:
+- [ ] **Latency / graceful degradation (the current blocker).** On a thermally/memory-constrained laptop,
+      sustained software H.264 decode throttles the whole CPU and latency spirals once acam falls behind
+      (decode climbs 18ms→167ms over a session; our output path is only ~0.6ms). Add drop-stale-frames to the
+      engine so latency stays bounded on slow hardware; longer term, hardware/DXVA decode to offload the CPU.
+- [ ] Remove the temporary debug instrumentation before merging the branch.
+- [ ] Avoid the elevation requirement: let the DLL (runs in the Frame Server, which has
+      `SeCreateGlobalPrivilege`) create the shared section and have non-elevated `acam` open it; or use a named
+      pipe (`\\.\pipe\acam-video`, no privilege needed). Right now `acam` must be Administrator.
+- [ ] Merge `create_camera.exe` (the test host that calls `MFCreateVirtualCamera`) into `acam` so it's one
+      process, not two. Also: Windows 10 has no `MFCreateVirtualCamera` (point those users at the OBS plugin).
+- [ ] Sign the accessory WinUSB INF (`pc/accessory-driver/`) so it installs without disabling driver-signature
+      enforcement; or drop the AOA path entirely in favour of the `adb forward` tunnel.
 - [ ] UDP discovery: Windows Firewall permission for ports 5000/5001 on first run.
-- [ ] Build: target `x86_64-pc-windows-msvc`, `.exe` icon and metadata, then an installer (MSI via `cargo-wix`, or a zip).
-- [ ] OBS plugin: build a `.dll` with the Windows OBS SDK (obs-deps + obs-studio), install to
-      `%ProgramData%\obs-studio\plugins\acam-source\`.
+- [ ] Build: `.exe` icon and metadata, then an installer (MSI via `cargo-wix`, or a zip) that also installs +
+      registers the vcam-source DLL.
+- [ ] OBS plugin: build a `.dll` with the Windows OBS SDK; `FrameShare` is a no-op stub on Windows for now
+      (the `ACVF` transport needs a named pipe — see the Shared section).
+
+#### Struggles / hard-won lessons (so the next person doesn't repeat them)
+
+- **`MFCreateVirtualCamera` needs a whole custom COM media source, not a "push a frame" API.** The debugging
+  chain was: the registered CLSID must hand out an **`IMFActivate`** (not `IMFMediaSource`) from
+  `IClassFactory::CreateInstance`; its `ActivateObject` must return an **`IMFMediaSourceEx`** (not plain
+  `IMFMediaSource`); `GetSourceAttributes` must return a **persistent** store carrying
+  `MF_DEVICEMFT_SENSORPROFILE_COLLECTION` (a real `IMFSensorProfileCollection` with a `KSCAMERAPROFILE_Legacy`
+  profile + `AddProfileFilter(0, "((RES==;FRT<=30,1;SUT==))")` — the filter-string syntax is only in
+  Microsoft's "Camera Profile V2 Device MFT Support" docs); stream attributes need
+  `MF_DEVICESTREAM_STREAM_CATEGORY`/`_STREAM_ID`/`_FRAMESERVER_SHARED`/`_ATTRIBUTE_FRAMESOURCE_TYPES`. Each was
+  a separate `E_NOINTERFACE`/`E_INVALIDARG`/`MF_E_ATTRIBUTENOTFOUND` found by logging the exact IID/attr the
+  caller asked for and matching it against the SDK headers. `smourier/VCamSample` (C++) was the key reference.
+- **`E_ACCESSDENIED` on `IMFVirtualCamera::Start` = the DLL is somewhere the Frame Server services (Local
+  Service / Local System) can't read.** Don't register it from a build dir under `C:\Users\<you>\...`; install
+  it to `C:\Users\Public\acam\` (world-readable, user-writable).
+- **Black screen despite frames flowing = zero-based sample timestamps.** A live source must stamp samples with
+  `MFGetSystemTime()`; a renderer whose clock is already at wall-clock time drops every "past" frame.
+- **AOA-over-USB on Windows is a driver rabbit hole.** With USB debugging on, the phone enumerates as the
+  accessory+ADB composite (PID `2D01`) and Windows binds the **MTP driver to interface 0** (the accessory data
+  interface libusb needs) → `Entity not found`. Zadig targets the wrong interface and hits "Resource already
+  exists". With debugging off (PID `2D00`, cleaner) libusb can't open the phone to *send* the AOA switch.
+  Conclusion: `adb forward` (what scrcpy/most tools actually use on Windows) is far more robust — and ACAM's
+  existing TCP server works through it unchanged.
+- **The latency rabbit hole.** Early symptom was huge, growing latency. It was NOT our code:
+  - Over Wi-Fi it was bufferbloat (rtt grew to 8s as the phone outran the link).
+  - Over a USB `adb forward` tunnel, `--no-webcam` gave 2ms rtt but webcam-on grew unbounded → we blamed the
+    output path. A disk-backed mmap file (`video.bin`) *did* add a real stall (writeback on a 92%-full SSD), so
+    we moved to pagefile-backed RAM shared memory — but the latency still spiralled.
+  - Per-frame timing finally showed the truth: `deliver` (our scale + NV12 + shared-mem write) is ~0.6ms;
+    **decode** is ~18ms and *climbs with session time* (→167ms), with `deliver` rising proportionally — i.e.
+    whole-CPU throttling/swap, a hardware limit, made worse once acam decodes a backlog flat-out and spirals.
+  - Method that isolates this cleanly: `adb forward` + `acam --headless --host 127.0.0.1`, and watch the
+    `rtt` + the (temporary) `decode`/`deliver` timing in the stats line.
 
 ### macOS
 
