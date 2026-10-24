@@ -1,4 +1,8 @@
+mod adb;
 mod controls;
+mod decode;
+#[cfg(windows)]
+mod decode_mf;
 mod engine;
 mod gui;
 mod gui_image;
@@ -38,6 +42,8 @@ pub struct Args {
     token: Option<u32>,
     #[arg(help = t!("cli.usb").to_string(), long, conflicts_with_all = ["host", "discover"])]
     usb: bool,
+    #[arg(help = t!("cli.adb").to_string(), long, conflicts_with_all = ["host", "discover", "usb"])]
+    adb: bool,
     #[arg(help = t!("cli.usb_vid").to_string(), long, value_parser = parse_hex_u16, requires = "usb")]
     usb_vid: Option<u16>,
     #[arg(help = t!("cli.device").to_string(), long, default_value_t = default_device())]
@@ -65,6 +71,9 @@ impl Args {
     pub fn engine_config(&self, stats_interval: Duration) -> Result<Option<EngineConfig>> {
         let mode = if self.usb {
             Mode::Usb { vid: self.usb_vid }
+        } else if self.adb {
+            let Some(token) = self.token else { bail!("{}", t!("cli.need_token")) };
+            Mode::Adb { port: self.port, token }
         } else if self.host.is_some() || self.discover {
             let Some(token) = self.token else { bail!("{}", t!("cli.need_token")) };
             Mode::Tcp { host: self.host.clone(), port: self.port, token }

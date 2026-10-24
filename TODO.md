@@ -35,23 +35,38 @@ What works on the branch:
       (`pc/vcam-source`), registered via `scripts/windows-vcam-register.ps1`. Shows up and streams.
 - [x] Real frames producer→DLL over `pc/vcam-ipc` (pagefile-backed `Global\` shared-memory section, seqlock,
       fixed 1280x720 NV12). `acam.exe` must run **elevated** to create the `Global\` section.
-- [x] USB: works by tunnelling acam's existing TCP over USB with `adb forward tcp:5000 tcp:5000` then
-      `acam --headless --host 127.0.0.1` (scrcpy's approach — no AOA driver needed). An AOA WinUSB INF is in
-      `pc/accessory-driver/` as an alternative, but AOA-direct on Windows is fiddly (see struggles).
+- [x] USB: `acam --adb` (and the GUI's ADB tab) runs `adb forward tcp:5000 tcp:5000` itself on every
+      (re)connect and tunnels acam's existing TCP over the cable (scrcpy's approach — no AOA driver needed;
+      `pc/src/adb.rs`). An AOA WinUSB INF is in `pc/accessory-driver/` as an alternative, but AOA-direct on
+      Windows is fiddly (see struggles).
+- [x] One process: `acam.exe` creates the "ACAM Camera" device itself (`MFCreateVirtualCamera`, session
+      lifetime, current user — no elevation for this part) when the webcam output opens, and removes it when
+      the output closes or acam exits. `create_camera.exe` is now only a test harness for the DLL alone.
+      (Pattern confirmed against OpenCam's `OpenCamVirtualCameraHost.cpp`.)
+- [x] Hardware decode: on Windows the Media Foundation H.264 decoder MFT is used with a D3D11 device (DXVA,
+      GPU), falling back to MF software, then openh264 (`pc/src/decode_mf.rs`, `pc/src/decode.rs`).
+      `MF_LOW_LATENCY` keeps it at one frame out per frame in. A GPU decoder that fails mid-stream is
+      replaced by a software one at the next keyframe. `ACAM_DECODER=openh264|mf|mf-sw` forces a choice.
+      720p on the dev laptop: openh264 3.7 ms/frame, MF CPU 2.2 ms, MF GPU 1.8 ms (and the CPU stays free).
 
 Still to do:
-- [ ] **Latency / graceful degradation (the current blocker).** On a thermally/memory-constrained laptop,
-      sustained software H.264 decode throttles the whole CPU and latency spirals once acam falls behind
-      (decode climbs 18ms→167ms over a session; our output path is only ~0.6ms). Add drop-stale-frames to the
-      engine so latency stays bounded on slow hardware; longer term, hardware/DXVA decode to offload the CPU.
+- [ ] **Latency / graceful degradation.** On a thermally/memory-constrained laptop, sustained software
+      H.264 decode throttled the whole CPU and latency spiralled once acam fell behind (decode climbed
+      18ms→167ms over a session; our output path is only ~0.6ms). **GPU decode fixed it** (measured with a
+      phone over `--adb`, 720p30 ~4 Mbps, ~6 min): rtt stays 2–40 ms with brief self-recovering spikes, 30 fps.
+      `decode` (incl. the GPU→RAM readback in `Lock2D`) still drifts 10→~28 ms and then plateaus — under the
+      33 ms frame budget, but with little headroom. Ideas: overlap the readback with the next decode, or keep
+      frames on the GPU. Still worth adding drop-stale-frames to the engine so latency stays bounded on
+      hardware without a usable GPU decoder.
 - [ ] Remove the temporary debug instrumentation before merging the branch.
 - [ ] Avoid the elevation requirement: let the DLL (runs in the Frame Server, which has
       `SeCreateGlobalPrivilege`) create the shared section and have non-elevated `acam` open it; or use a named
       pipe (`\\.\pipe\acam-video`, no privilege needed). Right now `acam` must be Administrator.
-- [ ] Merge `create_camera.exe` (the test host that calls `MFCreateVirtualCamera`) into `acam` so it's one
-      process, not two. Also: Windows 10 has no `MFCreateVirtualCamera` (point those users at the OBS plugin).
+- [ ] Windows 10 has no `MFCreateVirtualCamera` (acam reports it and points at the OBS plugin). A DirectShow
+      source filter (what `dimalinau-lab/Virtual-Camera` does) would cover Win10 and DirectShow-only apps, at
+      the cost of not showing in the Windows Camera app — only if Win10 users ask.
 - [ ] Sign the accessory WinUSB INF (`pc/accessory-driver/`) so it installs without disabling driver-signature
-      enforcement; or drop the AOA path entirely in favour of the `adb forward` tunnel.
+      enforcement; or drop the AOA path entirely in favour of `--adb`.
 - [ ] UDP discovery: Windows Firewall permission for ports 5000/5001 on first run.
 - [ ] Build: `.exe` icon and metadata, then an installer (MSI via `cargo-wix`, or a zip) that also installs +
       registers the vcam-source DLL.

@@ -24,6 +24,16 @@ smallvec = "1"
 # shared-memory transport is pulled in only there.
 [target.'cfg(windows)'.dependencies]
 vcam-ipc = { path = "vcam-ipc" }
+# Media Foundation: the H.264 decoder MFT with DXVA (src/decode_mf.rs) and the virtual camera host
+# (src/vcam_windows.rs).
+windows = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Direct3D",
+    "Win32_Graphics_Direct3D11",
+    "Win32_Graphics_Dxgi",
+    "Win32_Media_MediaFoundation",
+    "Win32_System_Com",
+] }
 
 # The per-frame video path (nearest-neighbour scaling, I420->NV12, the shared-memory copy) is in
 # these crates. At the default dev opt-level 0 those tight pixel loops can't keep up with 30 fps and

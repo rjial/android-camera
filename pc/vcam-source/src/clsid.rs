@@ -5,6 +5,15 @@
 
 use windows::core::GUID;
 
-pub const CLSID_STR: &str = "{ACA40001-0000-4000-8000-000000000001}";
+/// Shared with `acam.exe`, which creates the camera from it.
+pub use vcam_ipc::CLSID_STR;
 
 pub const CLSID: GUID = GUID::from_u128(0xACA40001_0000_4000_8000_000000000001);
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn string_matches_guid() {
+        assert_eq!(format!("{{{:?}}}", super::CLSID), super::CLSID_STR);
+    }
+}

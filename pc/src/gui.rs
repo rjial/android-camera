@@ -24,6 +24,7 @@ const FPS: [u8; 5] = [15, 24, 25, 30, 60];
 enum Transport {
     Wifi,
     Usb,
+    Adb,
 }
 
 struct Found {
@@ -117,7 +118,13 @@ impl AcamApp {
 
         let mut app = Self {
             engine,
-            transport: if args.usb { Transport::Usb } else { Transport::Wifi },
+            transport: if args.usb {
+                Transport::Usb
+            } else if args.adb {
+                Transport::Adb
+            } else {
+                Transport::Wifi
+            },
             host,
             token,
             usb_vid,
@@ -236,6 +243,10 @@ impl AcamApp {
                 let vid = self.usb_vid.read(cx).value().trim().to_string();
                 let vid = if vid.is_empty() { None } else { Some(crate::parse_hex_u16(&vid)?) };
                 Mode::Usb { vid }
+            }
+            Transport::Adb => {
+                let token = self.token.read(cx).value().trim().parse::<u32>().map_err(|_| t!("gui.err_token").to_string())?;
+                Mode::Adb { port: self.port, token }
             }
         };
         Ok(EngineConfig {
@@ -397,6 +408,17 @@ impl AcamApp {
                         this.transport = Transport::Usb;
                         cx.notify();
                     })),
+            )
+            .child(
+                Button::new("tab-adb")
+                    .label("ADB")
+                    .small()
+                    .selected(self.transport == Transport::Adb)
+                    .disabled(connected)
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.transport = Transport::Adb;
+                        cx.notify();
+                    })),
             );
 
         let transport_form = match self.transport {
@@ -433,6 +455,11 @@ impl AcamApp {
                     t!("gui.usb_hint").to_string(),
                 ))
                 .child(Input::new(&self.usb_vid).disabled(connected))
+                .into_any_element(),
+            Transport::Adb => v_flex()
+                .gap_2()
+                .child(div().text_xs().text_color(theme.muted_foreground).child(t!("gui.adb_hint").to_string()))
+                .child(Input::new(&self.token).disabled(connected))
                 .into_any_element(),
         };
 

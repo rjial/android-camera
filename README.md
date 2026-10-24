@@ -65,6 +65,7 @@ The plugin is installed to `~/.config/obs-studio/plugins/acam-source/` (`bin/64b
    pc/target/release/acam --headless --host 192.168.1.23 --token 123456
    pc/target/release/acam --headless --discover --token 123456
    pc/target/release/acam --headless --usb
+   pc/target/release/acam --headless --adb --token 123456
    ```
 4. Pick the **Android Cam** camera in your browser, OBS or Zoom. Quick check: `ffplay /dev/video10`.
 
@@ -79,6 +80,14 @@ automatically, without a token. The phone's USB mode (MTP/ADB) returns to normal
 This needs access to the phone's USB device without root. The `android-udev-rules` package covers most brands.
 If you get a permission error, add a udev rule for your phone's vendor and for `18d1:2d00`/`18d1:2d01`.
 Unrecognised brands can be forced with `--usb-vid <hex>`.
+
+### Over a USB cable through ADB
+
+If you already have USB debugging on (Developer options) and Android platform-tools installed, pick the ADB tab in the
+GUI or run `acam --headless --adb --token 123456`. `acam` runs `adb forward tcp:5000 tcp:5000` and connects through
+the cable with the normal Wi-Fi protocol, so it needs the token but no udev rule or USB driver (the easiest USB route
+on Windows). `adb` is looked up in `ACAM_ADB`, `ANDROID_HOME`/`ANDROID_SDK_ROOT`, the default SDK location,
+`~/platform-tools` and `PATH`.
 
 The virtual webcam is opened once with the size of the first connection and stays open across reconnects; streams at
 other resolutions are scaled to that size, so apps like Zoom do not lose the camera.
