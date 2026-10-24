@@ -67,8 +67,10 @@ Still to do:
 - [ ] Windows 10 has no `MFCreateVirtualCamera` (acam reports it and points at the OBS plugin). A DirectShow
       source filter (what `dimalinau-lab/Virtual-Camera` does) would cover Win10 and DirectShow-only apps, at
       the cost of not showing in the Windows Camera app — only if Win10 users ask.
-- [ ] Sign the accessory WinUSB INF (`pc/accessory-driver/`) so it installs without disabling driver-signature
-      enforcement; or drop the AOA path entirely in favour of `--adb`.
+- [ ] AOA (USB without debugging) on Windows. **ADB is the supported USB route on Windows for now.** If AOA is
+      wanted: UsbDk for the switch + a signed WinUSB driver for the accessory (see "AOA with UsbDk" below). The
+      unsigned WinUSB INF in `pc/accessory-driver/` is the starting point; signing needs either a self-signed
+      cert added to the machine's trusted root at install (what Zadig/libwdi do) or attestation signing.
 - [x] UDP discovery: the installer adds an inbound firewall rule for `acam.exe` (private and domain networks).
 - [x] Installer: `packaging/windows/build-installer.ps1` → Inno Setup `acam-<ver>-windows-x86_64-setup.exe`.
       Installs `acam.exe` + `vcam_source.dll` to Program Files and registers the DLL (`regserver`), the OBS plugin
@@ -106,6 +108,16 @@ Still to do:
   accessory+ADB composite (PID `2D01`) and Windows binds the **MTP driver to interface 0** (the accessory data
   interface libusb needs) → `Entity not found`. Zadig targets the wrong interface and hits "Resource already
   exists". With debugging off (PID `2D00`, cleaner) libusb can't open the phone to *send* the AOA switch.
+  libusbK has the same limit (no filter mode: the switch would need the phone's MTP driver replaced, per phone
+  model).
+- **AOA with UsbDk (tried 2026-10-24, Samsung A52s, UsbDk 1.0.22 — reverted).** libusb's UsbDk backend
+  (`rusb::UsbOption::use_usbdk()`) *does* send the AOA switch to an MTP-held phone, as long as the handle that
+  probed `GET_PROTOCOL` also sends the switch (closing and reopening right away fails with "Redirector startup
+  failed" while UsbDk hands the device back). But the **accessory side doesn't work**: with debugging off,
+  `18d1:2D00` has no driver (problem code 28), UsbDk enumeration then fails, and `libusb_open` on it hangs in
+  the kernel — acam can't be killed until the cable is unplugged. With debugging on (`2D01`, all interfaces
+  have drivers) opening it right after it appears hangs the same way. UsbDk can't replace a driver for the
+  accessory; at most it can do the switch.
   Conclusion: `adb forward` (what scrcpy/most tools actually use on Windows) is far more robust — and ACAM's
   existing TCP server works through it unchanged.
 - **The latency rabbit hole.** Early symptom was huge, growing latency. It was NOT our code:
