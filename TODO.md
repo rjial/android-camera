@@ -22,9 +22,9 @@ translations and camera controls. What is still Linux-specific is listed below.
 ### Windows
 
 **Status: a working prototype exists on branch `windows-vcam-wip` (not merged).** The virtual camera
-shows live phone video in OBS, the Windows Camera app and browsers. The remaining blocker is latency on
-constrained hardware, not the camera itself. The branch still carries temporary debug instrumentation
-(decode/deliver timing in `engine.rs::receive`) that must be removed before merge.
+shows live phone video in OBS (also through the ACAM Camera source), the Windows Camera app and browsers,
+without Administrator. GPU decode fixed the latency spiral on constrained hardware. What's left before merge:
+check the OBS plugin still builds on Linux, then packaging (installer, CI, release).
 
 What works on the branch:
 - [x] Foundation: Linux-only code behind `#[cfg(target_os = "linux")]`; `VirtualCamera` trait (`pc/src/webcam.rs`)
@@ -61,7 +61,8 @@ Still to do:
       33 ms frame budget, but with little headroom. Ideas: overlap the readback with the next decode, or keep
       frames on the GPU. Still worth adding drop-stale-frames to the engine so latency stays bounded on
       hardware without a usable GPU decoder.
-- [ ] Remove the temporary debug instrumentation before merging the branch.
+- [x] Removed the temporary decode/deliver timing from `engine.rs::receive` (the stats line is fps, kbps
+      and rtt again). To measure decode speed now: `cargo test --release --bin acam decoder_speed -- --ignored --nocapture`.
 - [ ] Windows 10 has no `MFCreateVirtualCamera` (acam reports it and points at the OBS plugin). A DirectShow
       source filter (what `dimalinau-lab/Virtual-Camera` does) would cover Win10 and DirectShow-only apps, at
       the cost of not showing in the Windows Camera app — only if Win10 users ask.
@@ -106,8 +107,9 @@ Still to do:
   - Per-frame timing finally showed the truth: `deliver` (our scale + NV12 + shared-mem write) is ~0.6ms;
     **decode** is ~18ms and *climbs with session time* (→167ms), with `deliver` rising proportionally — i.e.
     whole-CPU throttling/swap, a hardware limit, made worse once acam decodes a backlog flat-out and spirals.
-  - Method that isolates this cleanly: `adb forward` + `acam --headless --host 127.0.0.1`, and watch the
-    `rtt` + the (temporary) `decode`/`deliver` timing in the stats line.
+  - Method that isolates this cleanly: `acam --headless --adb` (the USB tunnel takes the network out of the
+    picture), and watch `rtt` in the stats line. The per-frame `decode`/`deliver` timing that found the cause
+    was temporary instrumentation in `engine.rs::receive` (removed; see commit 8bfc13e and earlier for it).
 
 ### macOS
 

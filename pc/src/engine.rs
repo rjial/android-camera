@@ -586,8 +586,6 @@ fn receive(
     let mut waiting_keyframe = true;
     let (mut frames, mut bytes, mut stat_at) = (0u32, 0usize, Instant::now());
     let mut rtt_ms = 0.0f64;
-    // TEMP latency bring-up: where does the read loop spend time (decode vs deliver)?
-    let (mut dec_us, mut dec_max, mut del_us, mut del_max) = (0u128, 0u128, 0u128, 0u128);
 
     while !cancel.load(Ordering::Relaxed) {
         let p = Packet::read_from(stream)?;
@@ -627,19 +625,10 @@ fn receive(
                         d
                     }
                 };
-                let t_dec = Instant::now();
-                let decoded = d.decode(&p.payload);
-                let d_us = t_dec.elapsed().as_micros();
-                dec_us += d_us;
-                dec_max = dec_max.max(d_us);
-                match decoded {
+                match d.decode(&p.payload) {
                     Ok(Some(yuv)) => {
                         frames += 1;
-                        let t_del = Instant::now();
                         deliver(&yuv, shared)?;
-                        let dl_us = t_del.elapsed().as_micros();
-                        del_us += dl_us;
-                        del_max = del_max.max(dl_us);
                     }
                     Ok(None) => {}
                     Err(e) => {
@@ -674,13 +663,8 @@ fn receive(
             let secs = dt.as_secs_f64();
             let stats = Stats { fps: frames as f64 / secs, kbps: bytes as f64 * 8.0 / 1000.0 / secs, rtt_ms };
             shared.state.lock().unwrap().stats = stats;
-            let n = frames.max(1) as u128;
-            (shared.log)(&format!(
-                "{:.1} fps, {:.0} kbps, rtt {:.0} ms | decode avg {}us max {}us, deliver avg {}us max {}us",
-                stats.fps, stats.kbps, stats.rtt_ms, dec_us / n, dec_max, del_us / n, del_max
-            ));
+            (shared.log)(&format!("{:.1} fps, {:.0} kbps, rtt {:.0} ms", stats.fps, stats.kbps, stats.rtt_ms));
             (frames, bytes, stat_at) = (0, 0, Instant::now());
-            (dec_us, dec_max, del_us, del_max) = (0, 0, 0, 0);
         }
     }
     Ok(())
