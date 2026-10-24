@@ -1,0 +1,53 @@
+; acam-accessory.inf
+;
+; Binds the in-box WinUSB driver (winusb.sys) to an Android phone that acam has switched into
+; Android Open Accessory (AOA) mode, so acam can open its bulk endpoints over USB via libusb/rusb.
+;
+; This replaces the ad-hoc Zadig step on Windows. It follows Microsoft's "WinUSB device" universal
+; INF pattern and schroeder-/android_open_accessory_lib, with two ACAM-specific points:
+;   * It targets interface 0 (MI_00) of the accessory+ADB composite (PID 2D01) — that is the
+;     accessory *data* interface acam opens; without &MI_00 the MTP/usbccgp drivers keep it.
+;   * It publishes a DeviceInterfaceGUID, which libusb needs to enumerate a composite interface
+;     on Windows (see the libusb Windows wiki).
+;
+; Install: see README.md in this folder. On x64 an unsigned INF needs driver-signature enforcement
+; disabled for the install (winusb.sys itself is already signed); for distribution the package must
+; be signed.
+
+[Version]
+Signature   = "$Windows NT$"
+Class       = USBDevice
+ClassGuid   = {88BAE032-5A81-49F0-BC3D-A4FF138216D6}
+Provider    = %ProviderName%
+CatalogFile = acam-accessory.cat
+DriverVer   = 10/24/2026,1.0.0.0
+PnpLockdown = 1
+
+[Manufacturer]
+%ProviderName% = Standard,NTamd64
+
+[Standard.NTamd64]
+; Accessory-only mode (USB debugging off): a single-interface device.
+%DeviceName.2d00% = USB_Install, USB\VID_18D1&PID_2D00
+; Accessory + ADB mode (USB debugging on): bind only interface 0, the accessory data interface.
+%DeviceName.2d01% = USB_Install, USB\VID_18D1&PID_2D01&MI_00
+
+[USB_Install]
+Include = winusb.inf
+Needs   = WINUSB.NT
+
+[USB_Install.Services]
+Include = winusb.inf
+Needs   = WINUSB.NT.Services
+
+[USB_Install.HW]
+AddReg = Dev_AddReg
+
+[Dev_AddReg]
+; libusb (WinUSB backend) locates composite interfaces through this interface GUID.
+HKR,,DeviceInterfaceGUIDs,0x00010000,"{ACA40002-0000-4000-8000-000000000002}"
+
+[Strings]
+ProviderName    = "ACAM"
+DeviceName.2d00 = "ACAM Android Accessory"
+DeviceName.2d01 = "ACAM Android Accessory (ADB)"

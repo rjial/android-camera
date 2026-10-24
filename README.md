@@ -1,4 +1,4 @@
-# ACAM: use an Android phone camera as a Linux webcam over Wi-Fi or USB
+# ACAM: use an Android phone camera as a Linux or Windows webcam over Wi-Fi or USB
 
 - `android/`: Kotlin app. Runs a TCP server on port 5000 and accepts USB connections (Android Open Accessory), encodes the camera to H.264, and announces itself on UDP 5001.
 - `pc/`: Rust app `acam` with a GUI (gpui): camera preview, Wi-Fi/USB connection panel, camera controls. Decodes H.264 (openh264) and writes to v4l2loopback. A CLI mode is available with `--headless`.
@@ -6,7 +6,9 @@
 - `obs-plugin/`: OBS source plugin "ACAM Camera" (C) that takes video from `acam` without v4l2loopback.
 - `PROTOCOL.md`: protocol specification. `CHANGELOG.md`: release history. `TODO.md`: roadmap (Windows, macOS).
 
-Only Linux x86_64 is supported on the PC side for now; Windows and macOS support is tracked in [TODO.md](TODO.md).
+The PC side runs on Linux x86_64 and Windows 10/11 x64 (the virtual webcam needs Windows 11; on Windows 10 use the OBS
+plugin). On Windows, `acam` decodes on the GPU (Media Foundation/DXVA) and the webcam is a Media Foundation virtual
+camera, "ACAM Camera". macOS support is tracked in [TODO.md](TODO.md).
 
 ## Install from a release
 
@@ -19,6 +21,11 @@ Download from [Releases](https://github.com/rjial/android-camera/releases/latest
   ```bash
   tar -xzf acam-obs-plugin-*-linux-x86_64.tar.gz -C ~/.config/obs-studio/plugins/
   ```
+- **Windows:** `acam-<version>-windows-x86_64-setup.exe`. It installs `acam` (Start menu: ACAM), registers the
+  "ACAM Camera" virtual webcam, adds a firewall rule for Wi-Fi discovery on private networks and, optionally, the OBS
+  plugin (OBS 30+). Installing needs Administrator once; running `acam` does not. The installer is not code-signed yet,
+  so SmartScreen may warn ("More info" → "Run anyway"). For USB, use the ADB tab (USB debugging on the phone and
+  [platform-tools](https://developer.android.com/tools/releases/platform-tools)).
 
 Verify the files with `sha256sum -c SHA256SUMS`.
 
@@ -36,6 +43,11 @@ PC app:
 cd pc && cargo build --release
 ```
 
+Windows installer (Rust, Visual Studio 2022 with the C++ workload, git, OBS and Inno Setup 6):
+`packaging\windows\build-installer.ps1` builds everything into `dist\acam-<version>-windows-x86_64-setup.exe`.
+For development without installing, `scripts\windows-vcam-register.ps1 -Register` (as Administrator) registers a
+debug build of the camera DLL.
+
 Dependency notes: `gpui 0.2.2` is paired with `gpui-component =0.5.1` (0.6+ uses a different gpui fork), and
 `libc` is pinned to 0.2.188 in `Cargo.lock` because 0.2.190+ removed `ENOATTR`, which a gpui dependency (`xattr`) uses.
 Do not run `cargo update` without `cargo update -p libc --precise 0.2.188` afterwards.
@@ -48,6 +60,16 @@ cd obs-plugin && cmake -B build -DCMAKE_BUILD_TYPE=Release && cmake --build buil
 ```
 
 The plugin is installed to `~/.config/obs-studio/plugins/acam-source/` (`bin/64bit/acam-source.so` plus translations in `data/locale/`).
+
+On **Windows** (Visual Studio 2022 with the C++ workload, git and OBS installed; no CMake or OBS SDK needed), close OBS, then:
+
+```powershell
+obs-plugin\build-windows.ps1 -Install
+```
+
+It fetches the libobs headers matching the installed OBS version, builds `acam-source.dll` with MSVC and installs it to
+`%ProgramData%\obs-studio\plugins\acam-source\` (no admin needed). acam shares frames with it over the named pipe
+`\\.\pipe\acam-video`.
 
 ## Usage
 
@@ -65,6 +87,7 @@ The plugin is installed to `~/.config/obs-studio/plugins/acam-source/` (`bin/64b
    pc/target/release/acam --headless --host 192.168.1.23 --token 123456
    pc/target/release/acam --headless --discover --token 123456
    pc/target/release/acam --headless --usb
+   pc/target/release/acam --headless --adb --token 123456
    ```
 4. Pick the **Android Cam** camera in your browser, OBS or Zoom. Quick check: `ffplay /dev/video10`.
 
@@ -79,6 +102,14 @@ automatically, without a token. The phone's USB mode (MTP/ADB) returns to normal
 This needs access to the phone's USB device without root. The `android-udev-rules` package covers most brands.
 If you get a permission error, add a udev rule for your phone's vendor and for `18d1:2d00`/`18d1:2d01`.
 Unrecognised brands can be forced with `--usb-vid <hex>`.
+
+### Over a USB cable through ADB
+
+If you already have USB debugging on (Developer options) and Android platform-tools installed, pick the ADB tab in the
+GUI or run `acam --headless --adb --token 123456`. `acam` runs `adb forward tcp:5000 tcp:5000` and connects through
+the cable with the normal Wi-Fi protocol, so it needs the token but no udev rule or USB driver (the easiest USB route
+on Windows). `adb` is looked up in `ACAM_ADB`, `ANDROID_HOME`/`ANDROID_SDK_ROOT`, the default SDK location,
+`~/platform-tools` and `PATH`.
 
 The virtual webcam is opened once with the size of the first connection and stays open across reconnects; streams at
 other resolutions are scaled to that size, so apps like Zoom do not lose the camera.

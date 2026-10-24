@@ -2,15 +2,15 @@
 //! reconnects with backoff, decodes H.264, feeds v4l2loopback and keeps a preview frame.
 
 use rust_i18n::t;
+use crate::adb;
 use crate::controls::{Caps, Live};
+use crate::decode::{self, VideoDecoder, Yuv};
 use crate::nosignal::{self, Reason};
 use crate::protocol::*;
 use crate::share::FrameShare;
 use crate::usb;
-use crate::v4l2out::LoopbackOutput;
+use crate::webcam::{self, VirtualCamera};
 use anyhow::{Context, Result, bail};
-use openh264::decoder::Decoder;
-use openh264::formats::YUVSource;
 use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::{BufReader, Read, Write};
@@ -29,6 +29,8 @@ pub enum Mode {
     /// `host: None` means find the phone with UDP discovery first.
     Tcp { host: Option<String>, port: u16, token: u32 },
     Usb { vid: Option<u16> },
+    /// TCP to the phone tunnelled over USB by `adb forward` (needs USB debugging, no driver).
+    Adb { port: u16, token: u32 },
 }
 
 #[derive(Debug, Clone)]
@@ -298,11 +300,11 @@ fn sleep_unless(cancel: &AtomicBool, d: Duration) -> bool {
     !cancel.load(Ordering::Relaxed)
 }
 
-/// Owns the v4l2loopback node; opened lazily while the webcam switch is on.
+/// Owns the platform virtual webcam output; opened lazily while the webcam switch is on.
 struct Webcam {
     device: String,
     size: (usize, usize),
-    out: Option<LoopbackOutput>,
+    out: Option<Box<dyn VirtualCamera>>,
     failed: bool,
 }
 
@@ -313,7 +315,7 @@ impl Webcam {
         }
     }
 
-    fn sync(&mut self, shared: &Shared) -> Option<&mut LoopbackOutput> {
+    fn sync(&mut self, shared: &Shared) -> Option<&mut (dyn VirtualCamera + 'static)> {
         let on = shared.webcam.load(Ordering::Relaxed);
         if !on {
             if let Some(mut o) = self.out.take() {
@@ -326,10 +328,10 @@ impl Webcam {
             return None;
         }
         if self.out.is_none() && !self.failed {
-            match LoopbackOutput::open(&self.device, self.size.0, self.size.1) {
+            match webcam::open(&self.device, self.size.0, self.size.1) {
                 Ok(mut o) => {
                     let _ = o.write_black();
-                    (shared.log)(&t!("log.webcam_opened", device = self.device, width = o.width, height = o.height));
+                    (shared.log)(&t!("log.webcam_opened", device = self.device, width = o.width(), height = o.height()));
                     shared.state.lock().unwrap().webcam_error = None;
                     self.out = Some(o);
                 }
@@ -341,7 +343,7 @@ impl Webcam {
                 }
             }
         }
-        self.out.as_mut()
+        self.out.as_deref_mut()
     }
 
 }
@@ -362,11 +364,12 @@ fn watchdog(shared: Weak<Shared>) {
         };
         if let Some(reason) = reason {
             let mut w = shared.output.lock().unwrap();
-            // Before the first connect the webcam has no device or size yet.
-            if !w.device.is_empty()
+            // Before the first connect the webcam has no size yet. (Checking the size, not the
+            // device path, because the Windows virtual camera has no device path — it is always empty.)
+            if w.size != (0, 0)
                 && let Some(o) = w.sync(&shared)
             {
-                let (size, caption) = ((o.width, o.height), reason.caption());
+                let (size, caption) = ((o.width(), o.height()), reason.caption());
                 if picture.as_ref().is_none_or(|(s, c, _)| *s != size || *c != caption) {
                     let frame = nosignal::render(size.0, size.1, &caption);
                     picture = Some((size, caption, frame));
@@ -405,6 +408,7 @@ fn run(cfg: EngineConfig, shared: &Arc<Shared>, cancel: &Arc<AtomicBool>, shutdo
     while !cancel.load(Ordering::Relaxed) {
         let target = match &cfg.mode {
             Mode::Usb { .. } => "USB".to_string(),
+            Mode::Adb { .. } => "ADB".to_string(),
             Mode::Tcp { host: Some(h), .. } => h.clone(),
             Mode::Tcp { host: None, .. } => {
                 set_status(shared, Status::Connecting(t!("status.searching").to_string()));
@@ -425,13 +429,17 @@ fn run(cfg: EngineConfig, shared: &Arc<Shared>, cancel: &Arc<AtomicBool>, shutdo
             Mode::Usb { vid } => {
                 // If the phone sits in accessory mode but the app never answers (e.g. it was closed),
                 // resetting the device drops it out of accessory mode so the next switch relaunches the app.
-                let reset = usb_failures >= 2;
+                // `ACAM_USB_NO_RESET` disables that so the accessory device stays enumerated — needed on
+                // Windows while installing its WinUSB driver (Zadig), which takes longer than the reset window.
+                let reset = usb_failures >= 2 && std::env::var_os("ACAM_USB_NO_RESET").is_none();
                 if reset {
                     usb_failures = 0;
                 }
                 connect_usb(*vid, reset, cancel.clone())
             }
             Mode::Tcp { port, .. } => connect_tcp(&target, *port, shutdown),
+            // Re-done on every attempt: the forward is gone after the phone is unplugged.
+            Mode::Adb { port, .. } => adb::forward(*port).and_then(|()| connect_tcp("127.0.0.1", *port, shutdown)),
         };
         let result = link.and_then(|link| session(&cfg, link, shared, cancel, &mut dump));
         *shared.ctrl.lock().unwrap() = None;
@@ -501,7 +509,7 @@ fn session(
     let mut reader = BufReader::with_capacity(1 << 20, reader);
 
     let token = match cfg.mode {
-        Mode::Tcp { token, .. } => token,
+        Mode::Tcp { token, .. } | Mode::Adb { token, .. } => token,
         Mode::Usb { .. } => 0,
     };
     let hello = Hello {
@@ -572,7 +580,9 @@ fn receive(
     cancel: &AtomicBool,
     dump: &mut Option<File>,
 ) -> Result<()> {
-    let mut decoder: Option<Decoder> = None;
+    let mut decoder: Option<Box<dyn VideoDecoder>> = None;
+    // The last SPS/PPS, fed to any decoder created after it (e.g. after a decode error).
+    let mut config: Option<Vec<u8>> = None;
     let mut waiting_keyframe = true;
     let (mut frames, mut bytes, mut stat_at) = (0u32, 0usize, Instant::now());
     let mut rtt_ms = 0.0f64;
@@ -582,7 +592,8 @@ fn receive(
         match p.kind {
             T_CODEC_CONFIG => {
                 // New SPS/PPS may carry a new resolution (e.g. after switching cameras), so start fresh.
-                let mut d = Decoder::new()?;
+                decoder = None;
+                let d = decoder.insert(decode::open(&*shared.log)?);
                 if let Some(f) = dump.as_mut() {
                     f.write_all(&p.payload)?;
                 }
@@ -592,7 +603,7 @@ fn receive(
                     frames += 1;
                     deliver(&yuv, shared)?;
                 }
-                decoder = Some(d);
+                config = Some(p.payload);
             }
             T_FRAME => {
                 bytes += p.payload.len();
@@ -606,7 +617,13 @@ fn receive(
                 // Encoders that only send SPS/PPS inline with keyframes never emit CODEC_CONFIG.
                 let d = match decoder.as_mut() {
                     Some(d) => d,
-                    None => decoder.insert(Decoder::new()?),
+                    None => {
+                        let d = decoder.insert(decode::open(&*shared.log)?);
+                        if let Some(c) = &config {
+                            let _ = d.decode(c);
+                        }
+                        d
+                    }
                 };
                 match d.decode(&p.payload) {
                     Ok(Some(yuv)) => {
@@ -615,7 +632,10 @@ fn receive(
                     }
                     Ok(None) => {}
                     Err(e) => {
-                        (shared.log)(&t!("log.decode_error", error = e));
+                        (shared.log)(&t!("log.decode_error", error = format!("{e:#}")));
+                        // Start over with a fresh decoder at the next keyframe (one that failed on the
+                        // GPU is replaced by a software one, see decode::open).
+                        decoder = None;
                         waiting_keyframe = true;
                         send(&shared.ctrl, Packet::new(T_REQ_KEYFRAME, 0));
                     }
@@ -651,21 +671,18 @@ fn receive(
 }
 
 /// Sends a decoded frame to the virtual webcam and, if enabled, to the preview.
-fn deliver(yuv: &openh264::decoder::DecodedYUV<'_>, shared: &Shared) -> Result<()> {
+fn deliver(yuv: &Yuv<'_>, shared: &Shared) -> Result<()> {
     *shared.last_frame.lock().unwrap() = Instant::now();
     if let Some(o) = shared.output.lock().unwrap().sync(shared) {
-        o.write_i420(yuv.dimensions(), yuv.strides(), yuv.y(), yuv.u(), yuv.v())?;
+        o.write_i420(yuv.size, yuv.strides, yuv.y, yuv.u, yuv.v)?;
     }
     if shared.obs.load(Ordering::Relaxed) {
-        shared.share.publish(yuv.dimensions(), yuv.strides(), yuv.y(), yuv.u(), yuv.v());
+        shared.share.publish(yuv.size, yuv.strides, yuv.y, yuv.u, yuv.v);
     }
     if shared.preview.load(Ordering::Relaxed) {
-        let (w, h) = yuv.dimensions();
+        let (w, h) = yuv.size;
         let mut bgra = vec![0u8; w * h * 4];
-        yuv.write_rgba8(&mut bgra);
-        for px in bgra.chunks_exact_mut(4) {
-            px.swap(0, 2);
-        }
+        decode::i420_to_bgra(yuv, &mut bgra);
         let mut st = shared.state.lock().unwrap();
         st.frame = Some(Arc::new(PreviewFrame { width: w as u32, height: h as u32, bgra }));
         st.frame_seq += 1;

@@ -1,19 +1,33 @@
 /* OBS source "ACAM Camera": shows the phone camera that a running acam (GUI or --headless)
- * shares over a unix socket, without v4l2loopback. Wire format ("ACVF") is in PROTOCOL.md. */
+ * shares over a unix socket (a named pipe on Windows), without a virtual webcam driver.
+ * Wire format ("ACVF") is in PROTOCOL.md. */
+
+#ifdef _WIN32
+#define _CRT_SECURE_NO_WARNINGS
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#endif
 
 #include <obs-module.h>
 #include <util/platform.h>
-#include <util/threading.h>
 
-#include <errno.h>
-#include <pthread.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+#ifdef _WIN32
+/* From util/threading.h, which needs OBS's w32-pthreads headers on Windows. */
+EXPORT void os_set_thread_name(const char *name);
+#else
+#include <util/threading.h>
+
+#include <errno.h>
+#include <pthread.h>
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <unistd.h>
+#endif
 
 OBS_DECLARE_MODULE()
 OBS_MODULE_USE_DEFAULT_LOCALE("acam-source", "en-US")
@@ -22,12 +36,39 @@ OBS_MODULE_USE_DEFAULT_LOCALE("acam-source", "en-US")
 #define MAX_DIM 8192
 #define STATS_INTERVAL_NS (60ull * 1000000000ull)
 
+/* ---- Platform layer: the connection to acam, a lock and the reader thread. ---- */
+#ifdef _WIN32
+typedef HANDLE conn_t; /* named pipe client end, opened for overlapped reads */
+#define CONN_NONE NULL
+#define PATH_LEN 256
+typedef SRWLOCK lock_t;
+#define lock_init(l) InitializeSRWLock(l)
+#define lock_destroy(l) ((void)(l))
+#define lock_take(l) AcquireSRWLockExclusive(l)
+#define lock_give(l) ReleaseSRWLockExclusive(l)
+typedef HANDLE thread_t;
+#else
+typedef int conn_t; /* unix socket */
+#define CONN_NONE (-1)
+#define PATH_LEN sizeof(((struct sockaddr_un *)0)->sun_path)
+typedef pthread_mutex_t lock_t;
+#define lock_init(l) pthread_mutex_init(l, NULL)
+#define lock_destroy(l) pthread_mutex_destroy(l)
+#define lock_take(l) pthread_mutex_lock(l)
+#define lock_give(l) pthread_mutex_unlock(l)
+typedef pthread_t thread_t;
+#endif
+
 struct acam_source {
 	obs_source_t *source;
-	pthread_t thread;
-	pthread_mutex_t lock;
+	thread_t thread;
+	lock_t lock;
 	char *path; /* guarded by lock */
-	int fd;     /* guarded by lock; -1 when not connected */
+	conn_t fd;  /* guarded by lock; CONN_NONE when not connected */
+#ifdef _WIN32
+	HANDLE wake;     /* manual-reset: set by kick() to abort a pending read */
+	HANDLE io_event; /* for the overlapped reads */
+#endif
 	volatile bool stop;
 	volatile bool no_signal; /* show the no-signal picture instead of clearing the source */
 	uint8_t *buf;
@@ -235,13 +276,19 @@ static void show_nosignal(struct acam_source *s, int reason)
 static void default_socket_path(char *out, size_t len)
 {
 	const char *env = getenv("ACAM_SOCKET");
-	const char *xdg = getenv("XDG_RUNTIME_DIR");
-	if (env && *env)
+	if (env && *env) {
 		snprintf(out, len, "%s", env);
-	else if (xdg && *xdg)
+		return;
+	}
+#ifdef _WIN32
+	snprintf(out, len, "%s", "\\\\.\\pipe\\acam-video");
+#else
+	const char *xdg = getenv("XDG_RUNTIME_DIR");
+	if (xdg && *xdg)
 		snprintf(out, len, "%s/acam/video.sock", xdg);
 	else
 		snprintf(out, len, "/tmp/acam-%u/video.sock", (unsigned)getuid());
+#endif
 }
 
 static uint32_t rd32(const uint8_t *p)
@@ -254,8 +301,63 @@ static uint64_t rd64(const uint8_t *p)
 	return (uint64_t)rd32(p) | (uint64_t)rd32(p + 4) << 32;
 }
 
-static bool read_full(int fd, uint8_t *dst, size_t len)
+#ifdef _WIN32
+/* Overlapped read, so kick() can abort it through the wake event. */
+static bool read_full(struct acam_source *s, conn_t fd, uint8_t *dst, size_t len)
 {
+	while (len > 0) {
+		OVERLAPPED ov = {0};
+		ov.hEvent = s->io_event;
+		DWORD n = 0, want = len > (1u << 30) ? (1u << 30) : (DWORD)len;
+		if (!ReadFile(fd, dst, want, NULL, &ov)) {
+			if (GetLastError() != ERROR_IO_PENDING)
+				return false;
+			HANDLE events[2] = {s->io_event, s->wake};
+			if (WaitForMultipleObjects(2, events, FALSE, INFINITE) != WAIT_OBJECT_0) {
+				CancelIoEx(fd, &ov);
+				GetOverlappedResult(fd, &ov, &n, TRUE);
+				return false;
+			}
+		}
+		if (!GetOverlappedResult(fd, &ov, &n, FALSE) || n == 0)
+			return false;
+		dst += n;
+		len -= n;
+	}
+	return true;
+}
+
+static conn_t connect_socket(struct acam_source *s)
+{
+	char path[PATH_LEN];
+	lock_take(&s->lock);
+	snprintf(path, sizeof(path), "%s", s->path);
+	lock_give(&s->lock);
+
+	HANDLE h = CreateFileA(path, GENERIC_READ, 0, NULL, OPEN_EXISTING, FILE_FLAG_OVERLAPPED, NULL);
+	if (h == INVALID_HANDLE_VALUE)
+		return CONN_NONE;
+
+	lock_take(&s->lock);
+	if (s->stop) {
+		lock_give(&s->lock);
+		CloseHandle(h);
+		return CONN_NONE;
+	}
+	ResetEvent(s->wake);
+	s->fd = h;
+	lock_give(&s->lock);
+	return h;
+}
+
+static void close_conn(conn_t fd)
+{
+	CloseHandle(fd);
+}
+#else
+static bool read_full(struct acam_source *s, conn_t fd, uint8_t *dst, size_t len)
+{
+	UNUSED_PARAMETER(s);
 	while (len > 0) {
 		ssize_t n = recv(fd, dst, len, MSG_WAITALL);
 		if (n < 0 && errno == EINTR)
@@ -268,41 +370,47 @@ static bool read_full(int fd, uint8_t *dst, size_t len)
 	return true;
 }
 
-static int connect_socket(struct acam_source *s)
+static conn_t connect_socket(struct acam_source *s)
 {
 	struct sockaddr_un addr = {.sun_family = AF_UNIX};
-	pthread_mutex_lock(&s->lock);
+	lock_take(&s->lock);
 	snprintf(addr.sun_path, sizeof(addr.sun_path), "%s", s->path);
-	pthread_mutex_unlock(&s->lock);
+	lock_give(&s->lock);
 
 	int fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
 	if (fd < 0)
-		return -1;
+		return CONN_NONE;
 	if (connect(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
 		close(fd);
-		return -1;
+		return CONN_NONE;
 	}
 	int size = 8 << 20;
 	setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &size, sizeof(size));
 
-	pthread_mutex_lock(&s->lock);
+	lock_take(&s->lock);
 	if (s->stop) {
-		pthread_mutex_unlock(&s->lock);
+		lock_give(&s->lock);
 		close(fd);
-		return -1;
+		return CONN_NONE;
 	}
 	s->fd = fd;
-	pthread_mutex_unlock(&s->lock);
+	lock_give(&s->lock);
 	return fd;
 }
 
+static void close_conn(conn_t fd)
+{
+	close(fd);
+}
+#endif
+
 /* Reads frames until the socket closes or carries garbage. */
-static void read_frames(struct acam_source *s, int fd)
+static void read_frames(struct acam_source *s, conn_t fd)
 {
 	uint8_t hdr[HEADER_LEN];
 	uint64_t lat_sum = 0, lat_count = 0, lat_max = 0, stats_at = os_gettime_ns() + STATS_INTERVAL_NS;
 
-	while (!s->stop && read_full(fd, hdr, HEADER_LEN)) {
+	while (!s->stop && read_full(s, fd, hdr, HEADER_LEN)) {
 		if (memcmp(hdr, "ACVF", 4) != 0) {
 			blog(LOG_WARNING, "[acam] invalid header, reconnecting");
 			break;
@@ -325,7 +433,7 @@ static void read_frames(struct acam_source *s, int fd)
 			s->buf = brealloc(s->buf, size);
 			s->buf_size = size;
 		}
-		if (!read_full(fd, s->buf, size))
+		if (!read_full(s, fd, s->buf, size))
 			break;
 
 		uint64_t now = os_gettime_ns();
@@ -350,20 +458,19 @@ static void read_frames(struct acam_source *s, int fd)
 	}
 }
 
-static void *reader_thread(void *data)
+static void reader_loop(struct acam_source *s)
 {
-	struct acam_source *s = data;
 	bool warned = false;
 	os_set_thread_name("acam-source");
 
 	while (!s->stop) {
-		int fd = connect_socket(s);
-		if (fd < 0) {
+		conn_t fd = connect_socket(s);
+		if (fd == CONN_NONE) {
 			show_nosignal(s, REASON_ACAM_GONE);
 			if (!warned) {
-				pthread_mutex_lock(&s->lock);
-				blog(LOG_INFO, "[acam] waiting for acam on socket %s", s->path);
-				pthread_mutex_unlock(&s->lock);
+				lock_take(&s->lock);
+				blog(LOG_INFO, "[acam] waiting for acam on %s", s->path);
+				lock_give(&s->lock);
 				warned = true;
 			}
 			for (int i = 0; i < 10 && !s->stop; i++)
@@ -374,24 +481,68 @@ static void *reader_thread(void *data)
 		warned = false;
 		read_frames(s, fd);
 
-		pthread_mutex_lock(&s->lock);
-		s->fd = -1;
-		pthread_mutex_unlock(&s->lock);
-		close(fd);
+		lock_take(&s->lock);
+		s->fd = CONN_NONE;
+		lock_give(&s->lock);
+		close_conn(fd);
 		if (!s->stop)
 			blog(LOG_INFO, "[acam] disconnected from acam");
 	}
+}
+
+#ifdef _WIN32
+static DWORD WINAPI reader_thread(LPVOID data)
+{
+	reader_loop(data);
+	return 0;
+}
+
+static bool thread_start(struct acam_source *s)
+{
+	s->thread = CreateThread(NULL, 0, reader_thread, s, 0, NULL);
+	return s->thread != NULL;
+}
+
+static void thread_join(struct acam_source *s)
+{
+	WaitForSingleObject(s->thread, INFINITE);
+	CloseHandle(s->thread);
+}
+
+/* Aborts the reader's pending read; it reconnects (or exits when stopping). */
+static void kick(struct acam_source *s)
+{
+	lock_take(&s->lock);
+	if (s->fd != CONN_NONE)
+		SetEvent(s->wake);
+	lock_give(&s->lock);
+}
+#else
+static void *reader_thread(void *data)
+{
+	reader_loop(data);
 	return NULL;
+}
+
+static bool thread_start(struct acam_source *s)
+{
+	return pthread_create(&s->thread, NULL, reader_thread, s) == 0;
+}
+
+static void thread_join(struct acam_source *s)
+{
+	pthread_join(s->thread, NULL);
 }
 
 /* Wakes the reader out of recv(); it reconnects (or exits when stopping). */
 static void kick(struct acam_source *s)
 {
-	pthread_mutex_lock(&s->lock);
+	lock_take(&s->lock);
 	if (s->fd >= 0)
 		shutdown(s->fd, SHUT_RDWR);
-	pthread_mutex_unlock(&s->lock);
+	lock_give(&s->lock);
 }
+#endif
 
 static const char *acam_get_name(void *unused)
 {
@@ -404,18 +555,18 @@ static void acam_update(void *data, obs_data_t *settings)
 	struct acam_source *s = data;
 	s->no_signal = obs_data_get_bool(settings, "no_signal");
 	const char *path = obs_data_get_string(settings, "socket");
-	char def[sizeof(((struct sockaddr_un *)0)->sun_path)];
+	char def[PATH_LEN];
 	if (!path || !*path) {
 		default_socket_path(def, sizeof(def));
 		path = def;
 	}
-	pthread_mutex_lock(&s->lock);
+	lock_take(&s->lock);
 	bool changed = !s->path || strcmp(s->path, path) != 0;
 	if (changed) {
 		bfree(s->path);
 		s->path = bstrdup(path);
 	}
-	pthread_mutex_unlock(&s->lock);
+	lock_give(&s->lock);
 	if (changed)
 		kick(s);
 }
@@ -424,18 +575,22 @@ static void *acam_create(obs_data_t *settings, obs_source_t *source)
 {
 	struct acam_source *s = bzalloc(sizeof(*s));
 	s->source = source;
-	s->fd = -1;
+	s->fd = CONN_NONE;
 	s->last_w = 1280;
 	s->last_h = 720;
 	s->ns_reason = -1;
 	s->cur_color = -1;
-	pthread_mutex_init(&s->lock, NULL);
+	lock_init(&s->lock);
+#ifdef _WIN32
+	s->wake = CreateEventA(NULL, TRUE, FALSE, NULL);
+	s->io_event = CreateEventA(NULL, TRUE, FALSE, NULL);
+#endif
 	/* Async sources buffer frames for smooth playback by default; skip that for low latency. */
 	obs_source_set_async_unbuffered(source, true);
 	acam_update(s, settings);
-	if (pthread_create(&s->thread, NULL, reader_thread, s) != 0) {
+	if (!thread_start(s)) {
 		blog(LOG_ERROR, "[acam] failed to create thread");
-		pthread_mutex_destroy(&s->lock);
+		lock_destroy(&s->lock);
 		bfree(s->path);
 		bfree(s);
 		return NULL;
@@ -448,8 +603,12 @@ static void acam_destroy(void *data)
 	struct acam_source *s = data;
 	s->stop = true;
 	kick(s);
-	pthread_join(s->thread, NULL);
-	pthread_mutex_destroy(&s->lock);
+	thread_join(s);
+	lock_destroy(&s->lock);
+#ifdef _WIN32
+	CloseHandle(s->wake);
+	CloseHandle(s->io_event);
+#endif
 	bfree(s->path);
 	bfree(s->buf);
 	bfree(s->ns_buf);
@@ -458,7 +617,7 @@ static void acam_destroy(void *data)
 
 static void acam_get_defaults(obs_data_t *settings)
 {
-	char def[sizeof(((struct sockaddr_un *)0)->sun_path)];
+	char def[PATH_LEN];
 	default_socket_path(def, sizeof(def));
 	obs_data_set_default_string(settings, "socket", def);
 	obs_data_set_default_bool(settings, "no_signal", true);

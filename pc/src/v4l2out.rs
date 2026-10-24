@@ -59,6 +59,35 @@ pub struct LoopbackOutput {
     frame: Vec<u8>,
 }
 
+impl crate::webcam::VirtualCamera for LoopbackOutput {
+    fn width(&self) -> usize {
+        self.width
+    }
+
+    fn height(&self) -> usize {
+        self.height
+    }
+
+    fn write_black(&mut self) -> Result<()> {
+        LoopbackOutput::write_black(self)
+    }
+
+    fn write_packed(&mut self, frame: &[u8]) -> Result<()> {
+        LoopbackOutput::write_packed(self, frame)
+    }
+
+    fn write_i420(
+        &mut self,
+        src_size: (usize, usize),
+        strides: (usize, usize, usize),
+        y: &[u8],
+        u: &[u8],
+        v: &[u8],
+    ) -> Result<()> {
+        LoopbackOutput::write_i420(self, src_size, strides, y, u, v)
+    }
+}
+
 impl LoopbackOutput {
     pub fn open(path: &str, width: usize, height: usize) -> Result<Self> {
         let file = OpenOptions::new()
@@ -105,12 +134,12 @@ impl LoopbackOutput {
         }
 
         let mut frame = vec![0u8; width * height * 3 / 2];
-        fill_black(&mut frame, width, height);
+        crate::yuv::fill_black(&mut frame, width, height);
         Ok(Self { file, width, height, frame })
     }
 
     pub fn write_black(&mut self) -> Result<()> {
-        fill_black(&mut self.frame, self.width, self.height);
+        crate::yuv::fill_black(&mut self.frame, self.width, self.height);
         self.file.write_all(&self.frame).context(t!("err.v4l2_write"))
     }
 
@@ -122,30 +151,13 @@ impl LoopbackOutput {
     /// Fits the source I420 planes into the output size (nearest neighbour, letterboxed) and writes one frame.
     pub fn write_i420(
         &mut self,
-        (sw, sh): (usize, usize),
-        (ys, us, vs): (usize, usize, usize),
+        src: (usize, usize),
+        strides: (usize, usize, usize),
         y: &[u8],
         u: &[u8],
         v: &[u8],
     ) -> Result<()> {
-        let (dw, dh) = (self.width, self.height);
-        let (y_out, uv_out) = self.frame.split_at_mut(dw * dh);
-        let (u_out, v_out) = uv_out.split_at_mut((dw / 2) * (dh / 2));
-
-        if (sw, sh) == (dw, dh) {
-            copy_plane(y, ys, y_out, dw, dh);
-            copy_plane(u, us, u_out, dw / 2, dh / 2);
-            copy_plane(v, vs, v_out, dw / 2, dh / 2);
-        } else {
-            fill_black(&mut self.frame, dw, dh);
-            let (y_out, uv_out) = self.frame.split_at_mut(dw * dh);
-            let (u_out, v_out) = uv_out.split_at_mut((dw / 2) * (dh / 2));
-            let r = fit(sw, sh, dw, dh);
-            scale_plane(y, ys, sw, sh, y_out, dw, r);
-            let rc = Rect { x: r.x / 2, y: r.y / 2, w: r.w / 2, h: r.h / 2 };
-            scale_plane(u, us, sw / 2, sh / 2, u_out, dw / 2, rc);
-            scale_plane(v, vs, sw / 2, sh / 2, v_out, dw / 2, rc);
-        }
+        crate::yuv::scale_i420(src, strides, y, u, v, &mut self.frame, self.width, self.height);
         self.file.write_all(&self.frame).context(t!("err.v4l2_write"))
     }
 }
@@ -153,61 +165,4 @@ impl LoopbackOutput {
 fn cstr(b: &[u8]) -> String {
     let end = b.iter().position(|&c| c == 0).unwrap_or(b.len());
     String::from_utf8_lossy(&b[..end]).into_owned()
-}
-
-fn fill_black(frame: &mut [u8], w: usize, h: usize) {
-    let (y, uv) = frame.split_at_mut(w * h);
-    y.fill(16);
-    uv.fill(128);
-}
-
-fn copy_plane(src: &[u8], stride: usize, dst: &mut [u8], w: usize, h: usize) {
-    for row in 0..h {
-        dst[row * w..row * w + w].copy_from_slice(&src[row * stride..row * stride + w]);
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq)]
-struct Rect {
-    x: usize,
-    y: usize,
-    w: usize,
-    h: usize,
-}
-
-/// Largest rectangle with the source aspect ratio centred in the destination, even-aligned.
-fn fit(sw: usize, sh: usize, dw: usize, dh: usize) -> Rect {
-    let (w, h) = if sw * dh > sh * dw { (dw, sh * dw / sw) } else { (sw * dh / sh, dh) };
-    let (w, h) = (w & !1, h & !1);
-    Rect { x: ((dw - w) / 2) & !1, y: ((dh - h) / 2) & !1, w, h }
-}
-
-fn scale_plane(src: &[u8], stride: usize, sw: usize, sh: usize, dst: &mut [u8], dstride: usize, r: Rect) {
-    for dy in 0..r.h {
-        let srow = &src[(dy * sh / r.h) * stride..];
-        let drow = &mut dst[(r.y + dy) * dstride + r.x..];
-        for dx in 0..r.w {
-            drow[dx] = srow[dx * sw / r.w];
-        }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn fit_letterboxes_portrait_into_landscape() {
-        assert_eq!(fit(720, 1280, 1280, 720), Rect { x: 438, y: 0, w: 404, h: 720 });
-        assert_eq!(fit(1280, 720, 1280, 720), Rect { x: 0, y: 0, w: 1280, h: 720 });
-        assert_eq!(fit(1920, 1080, 1280, 720), Rect { x: 0, y: 0, w: 1280, h: 720 });
-    }
-
-    #[test]
-    fn scale_plane_downsamples() {
-        let src: Vec<u8> = (0..16).collect(); // 4x4
-        let mut dst = vec![0u8; 4];
-        scale_plane(&src, 4, 4, 4, &mut dst, 2, Rect { x: 0, y: 0, w: 2, h: 2 });
-        assert_eq!(dst, vec![0, 2, 8, 10]);
-    }
 }

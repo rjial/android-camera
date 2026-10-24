@@ -1,1 +1,4 @@
 build/
+# Windows build (build-windows.ps1): fetched OBS headers and build output.
+.deps/
+build-win/
