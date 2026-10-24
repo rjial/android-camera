@@ -1,0 +1,16 @@
+[package]
+name = "vcam-ipc"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+
+# Shared between acam.exe (the frame producer) and the vcam-source DLL (the consumer, loaded by the
+# Windows Frame Server). The transport is a pagefile-backed Global\ shared-memory section — see
+# src/lib.rs for why not a disk-backed file.
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_System_Memory",
+    "Win32_Security",
+] }

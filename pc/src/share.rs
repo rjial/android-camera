@@ -2,14 +2,21 @@
 //! Wire format ("ACVF") is documented in PROTOCOL.md.
 
 use rust_i18n::t;
+#[cfg(unix)]
 use std::io::Write;
+#[cfg(unix)]
 use std::os::fd::AsRawFd;
+#[cfg(unix)]
 use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+#[cfg(unix)]
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::mpsc::{SyncSender, TrySendError, sync_channel};
+use std::sync::mpsc::{SyncSender, TrySendError};
+#[cfg(unix)]
+use std::sync::mpsc::sync_channel;
 use std::sync::{Arc, Mutex};
+#[cfg(unix)]
 use std::thread;
 
 use crate::nosignal::Reason;
@@ -28,6 +35,7 @@ pub struct FrameShare {
 }
 
 /// `$ACAM_SOCKET`, else `$XDG_RUNTIME_DIR/acam/video.sock`, else `/tmp/acam-<uid>/video.sock`.
+#[cfg(unix)]
 pub fn socket_path() -> PathBuf {
     if let Some(p) = std::env::var_os("ACAM_SOCKET") {
         return PathBuf::from(p);
@@ -41,6 +49,7 @@ pub fn socket_path() -> PathBuf {
 
 impl FrameShare {
     /// Starts listening; on failure (e.g. another acam already shares) sharing is simply off.
+    #[cfg(unix)]
     pub fn start(log: Logger) -> Self {
         let clients: Arc<Mutex<Vec<SyncSender<Arc<Vec<u8>>>>>> = Arc::new(Mutex::new(Vec::new()));
         let count = Arc::new(AtomicUsize::new(0));
@@ -92,6 +101,13 @@ impl FrameShare {
         Self { path: Some(path), clients, count }
     }
 
+    /// No local-socket transport on this platform yet (see TODO.md); sharing is simply off.
+    #[cfg(not(unix))]
+    pub fn start(log: Logger) -> Self {
+        log(&t!("log.obs_unsupported"));
+        Self { path: None, clients: Arc::new(Mutex::new(Vec::new())), count: Arc::new(AtomicUsize::new(0)) }
+    }
+
     pub fn path(&self) -> Option<&Path> {
         self.path.as_deref()
     }
@@ -135,6 +151,7 @@ impl Drop for FrameShare {
     }
 }
 
+#[cfg(unix)]
 fn bind(path: &Path) -> std::io::Result<UnixListener> {
     if let Some(dir) = path.parent() {
         std::fs::DirBuilder::new().recursive(true).mode(0o700).create(dir)?;
@@ -154,10 +171,20 @@ fn bind(path: &Path) -> std::io::Result<UnixListener> {
 }
 
 /// Same clock as OBS's `os_gettime_ns()`, so the plugin can measure socket latency.
+#[cfg(unix)]
 pub fn monotonic_ns() -> u64 {
     let mut ts = libc::timespec { tv_sec: 0, tv_nsec: 0 };
     unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut ts) };
     ts.tv_sec as u64 * 1_000_000_000 + ts.tv_nsec as u64
+}
+
+/// No OBS plugin transport on this platform yet, so this only needs to be internally monotonic.
+#[cfg(not(unix))]
+pub fn monotonic_ns() -> u64 {
+    use std::sync::OnceLock;
+    use std::time::Instant;
+    static START: OnceLock<Instant> = OnceLock::new();
+    START.get_or_init(std::time::Instant::now).elapsed().as_nanos() as u64
 }
 
 fn header(w: u32, h: u32, pts_ns: u64, color: u8) -> [u8; HEADER_LEN] {
@@ -215,6 +242,7 @@ mod tests {
         assert_eq!(&header(0, 0, 0, 0)[4..12], &[0u8; 8]);
     }
 
+    #[cfg(unix)]
     #[test]
     fn delivers_to_socket_clients() {
         let dir = std::env::temp_dir().join(format!("acam-test-{}", std::process::id()));

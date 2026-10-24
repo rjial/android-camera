@@ -31,6 +31,13 @@ fn resolve(tag: &str) -> Option<&'static str> {
         .copied()
 }
 
+#[cfg(windows)]
+fn config_file() -> Option<PathBuf> {
+    let dir = std::env::var_os("APPDATA")?;
+    Some(PathBuf::from(dir).join("acam").join("language"))
+}
+
+#[cfg(not(windows))]
 fn config_file() -> Option<PathBuf> {
     let dir = std::env::var_os("XDG_CONFIG_HOME")
         .map(PathBuf::from)

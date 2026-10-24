@@ -7,7 +7,7 @@ use crate::nosignal::{self, Reason};
 use crate::protocol::*;
 use crate::share::FrameShare;
 use crate::usb;
-use crate::v4l2out::LoopbackOutput;
+use crate::webcam::{self, VirtualCamera};
 use anyhow::{Context, Result, bail};
 use openh264::decoder::Decoder;
 use openh264::formats::YUVSource;
@@ -298,11 +298,11 @@ fn sleep_unless(cancel: &AtomicBool, d: Duration) -> bool {
     !cancel.load(Ordering::Relaxed)
 }
 
-/// Owns the v4l2loopback node; opened lazily while the webcam switch is on.
+/// Owns the platform virtual webcam output; opened lazily while the webcam switch is on.
 struct Webcam {
     device: String,
     size: (usize, usize),
-    out: Option<LoopbackOutput>,
+    out: Option<Box<dyn VirtualCamera>>,
     failed: bool,
 }
 
@@ -313,7 +313,7 @@ impl Webcam {
         }
     }
 
-    fn sync(&mut self, shared: &Shared) -> Option<&mut LoopbackOutput> {
+    fn sync(&mut self, shared: &Shared) -> Option<&mut (dyn VirtualCamera + 'static)> {
         let on = shared.webcam.load(Ordering::Relaxed);
         if !on {
             if let Some(mut o) = self.out.take() {
@@ -326,10 +326,10 @@ impl Webcam {
             return None;
         }
         if self.out.is_none() && !self.failed {
-            match LoopbackOutput::open(&self.device, self.size.0, self.size.1) {
+            match webcam::open(&self.device, self.size.0, self.size.1) {
                 Ok(mut o) => {
                     let _ = o.write_black();
-                    (shared.log)(&t!("log.webcam_opened", device = self.device, width = o.width, height = o.height));
+                    (shared.log)(&t!("log.webcam_opened", device = self.device, width = o.width(), height = o.height()));
                     shared.state.lock().unwrap().webcam_error = None;
                     self.out = Some(o);
                 }
@@ -341,7 +341,7 @@ impl Webcam {
                 }
             }
         }
-        self.out.as_mut()
+        self.out.as_deref_mut()
     }
 
 }
@@ -362,11 +362,12 @@ fn watchdog(shared: Weak<Shared>) {
         };
         if let Some(reason) = reason {
             let mut w = shared.output.lock().unwrap();
-            // Before the first connect the webcam has no device or size yet.
-            if !w.device.is_empty()
+            // Before the first connect the webcam has no size yet. (Checking the size, not the
+            // device path, because the Windows virtual camera has no device path — it is always empty.)
+            if w.size != (0, 0)
                 && let Some(o) = w.sync(&shared)
             {
-                let (size, caption) = ((o.width, o.height), reason.caption());
+                let (size, caption) = ((o.width(), o.height()), reason.caption());
                 if picture.as_ref().is_none_or(|(s, c, _)| *s != size || *c != caption) {
                     let frame = nosignal::render(size.0, size.1, &caption);
                     picture = Some((size, caption, frame));
@@ -425,7 +426,9 @@ fn run(cfg: EngineConfig, shared: &Arc<Shared>, cancel: &Arc<AtomicBool>, shutdo
             Mode::Usb { vid } => {
                 // If the phone sits in accessory mode but the app never answers (e.g. it was closed),
                 // resetting the device drops it out of accessory mode so the next switch relaunches the app.
-                let reset = usb_failures >= 2;
+                // `ACAM_USB_NO_RESET` disables that so the accessory device stays enumerated — needed on
+                // Windows while installing its WinUSB driver (Zadig), which takes longer than the reset window.
+                let reset = usb_failures >= 2 && std::env::var_os("ACAM_USB_NO_RESET").is_none();
                 if reset {
                     usb_failures = 0;
                 }
@@ -576,6 +579,8 @@ fn receive(
     let mut waiting_keyframe = true;
     let (mut frames, mut bytes, mut stat_at) = (0u32, 0usize, Instant::now());
     let mut rtt_ms = 0.0f64;
+    // TEMP latency bring-up: where does the read loop spend time (decode vs deliver)?
+    let (mut dec_us, mut dec_max, mut del_us, mut del_max) = (0u128, 0u128, 0u128, 0u128);
 
     while !cancel.load(Ordering::Relaxed) {
         let p = Packet::read_from(stream)?;
@@ -608,10 +613,19 @@ fn receive(
                     Some(d) => d,
                     None => decoder.insert(Decoder::new()?),
                 };
-                match d.decode(&p.payload) {
+                let t_dec = Instant::now();
+                let decoded = d.decode(&p.payload);
+                let d_us = t_dec.elapsed().as_micros();
+                dec_us += d_us;
+                dec_max = dec_max.max(d_us);
+                match decoded {
                     Ok(Some(yuv)) => {
                         frames += 1;
+                        let t_del = Instant::now();
                         deliver(&yuv, shared)?;
+                        let dl_us = t_del.elapsed().as_micros();
+                        del_us += dl_us;
+                        del_max = del_max.max(dl_us);
                     }
                     Ok(None) => {}
                     Err(e) => {
@@ -643,8 +657,13 @@ fn receive(
             let secs = dt.as_secs_f64();
             let stats = Stats { fps: frames as f64 / secs, kbps: bytes as f64 * 8.0 / 1000.0 / secs, rtt_ms };
             shared.state.lock().unwrap().stats = stats;
-            (shared.log)(&format!("{:.1} fps, {:.0} kbps, rtt {:.0} ms", stats.fps, stats.kbps, stats.rtt_ms));
+            let n = frames.max(1) as u128;
+            (shared.log)(&format!(
+                "{:.1} fps, {:.0} kbps, rtt {:.0} ms | decode avg {}us max {}us, deliver avg {}us max {}us",
+                stats.fps, stats.kbps, stats.rtt_ms, dec_us / n, dec_max, del_us / n, del_max
+            ));
             (frames, bytes, stat_at) = (0, 0, Instant::now());
+            (dec_us, dec_max, del_us, del_max) = (0, 0, 0, 0);
         }
     }
     Ok(())

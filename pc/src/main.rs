@@ -7,7 +7,12 @@ mod protocol;
 mod nosignal;
 mod share;
 mod usb;
+#[cfg(target_os = "linux")]
 mod v4l2out;
+#[cfg(windows)]
+mod vcam_windows;
+mod webcam;
+mod yuv;
 
 use anyhow::{Result, bail};
 use rust_i18n::t;
@@ -35,7 +40,7 @@ pub struct Args {
     usb: bool,
     #[arg(help = t!("cli.usb_vid").to_string(), long, value_parser = parse_hex_u16, requires = "usb")]
     usb_vid: Option<u16>,
-    #[arg(help = t!("cli.device").to_string(), long, default_value = "/dev/video10")]
+    #[arg(help = t!("cli.device").to_string(), long, default_value_t = default_device())]
     device: String,
     #[arg(help = t!("cli.no_webcam").to_string(), long)]
     no_webcam: bool,
@@ -77,6 +82,18 @@ impl Args {
             stats_interval,
         }))
     }
+}
+
+/// The `--device` default: a v4l2loopback node on Linux, unused elsewhere until a platform
+/// `VirtualCamera` impl needs a different kind of identifier (see `webcam.rs`).
+#[cfg(target_os = "linux")]
+fn default_device() -> String {
+    "/dev/video10".to_string()
+}
+
+#[cfg(not(target_os = "linux"))]
+fn default_device() -> String {
+    String::new()
 }
 
 pub fn parse_size(s: &str) -> Result<(u16, u16), String> {
