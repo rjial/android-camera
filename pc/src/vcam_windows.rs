@@ -24,11 +24,13 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 use vcam_ipc::{CLSID_STR, FRAME_LEN, HEIGHT, WIDTH, Writer};
 use windows::Win32::Media::MediaFoundation::{
-    IMFVirtualCamera, MF_VERSION, MFCreateVirtualCamera, MFIsVirtualCameraTypeSupported, MFSTARTUP_NOSOCKET, MFShutdown,
-    MFStartup, MFVirtualCameraAccess_CurrentUser, MFVirtualCameraLifetime_Session, MFVirtualCameraType_SoftwareCameraSource,
+    IMFVirtualCamera, MF_VERSION, MFSTARTUP_NOSOCKET, MFShutdown, MFStartup, MFVirtualCameraAccess,
+    MFVirtualCameraAccess_CurrentUser, MFVirtualCameraLifetime, MFVirtualCameraLifetime_Session, MFVirtualCameraType,
+    MFVirtualCameraType_SoftwareCameraSource,
 };
 use windows::Win32::System::Com::{COINIT_MULTITHREADED, CoInitializeEx};
-use windows::core::HSTRING;
+use windows::Win32::System::LibraryLoader::{GetProcAddress, LOAD_LIBRARY_SEARCH_SYSTEM32, LoadLibraryExW};
+use windows::core::{BOOL, GUID, HRESULT, HSTRING, Interface, PCWSTR, s, w};
 
 /// What apps list the camera as.
 const FRIENDLY_NAME: &str = "ACAM Camera";
@@ -75,21 +77,52 @@ impl Drop for Host {
     }
 }
 
+type IsSupportedFn = unsafe extern "system" fn(MFVirtualCameraType, *mut BOOL) -> HRESULT;
+type CreateFn = unsafe extern "system" fn(
+    MFVirtualCameraType,
+    MFVirtualCameraLifetime,
+    MFVirtualCameraAccess,
+    PCWSTR,
+    PCWSTR,
+    *const GUID,
+    u32,
+    *mut *mut core::ffi::c_void,
+) -> HRESULT;
+
+/// `MFIsVirtualCameraTypeSupported` and `MFCreateVirtualCamera`, looked up at run time: they only
+/// exist from Windows 11, and importing them statically would stop acam from starting at all on
+/// Windows 10 (where it still works, just without the virtual camera).
+unsafe fn virtual_camera_api() -> Option<(IsSupportedFn, CreateFn)> {
+    unsafe {
+        let dll = LoadLibraryExW(w!("mfsensorgroup.dll"), None, LOAD_LIBRARY_SEARCH_SYSTEM32).ok()?;
+        let supported = GetProcAddress(dll, s!("MFIsVirtualCameraTypeSupported"))?;
+        let create = GetProcAddress(dll, s!("MFCreateVirtualCamera"))?;
+        Some((std::mem::transmute::<_, IsSupportedFn>(supported), std::mem::transmute::<_, CreateFn>(create)))
+    }
+}
+
 unsafe fn create_camera() -> Result<IMFVirtualCamera> {
     unsafe {
-        // Windows 10 has no MFCreateVirtualCamera at all.
-        if !MFIsVirtualCameraTypeSupported(MFVirtualCameraType_SoftwareCameraSource).is_ok_and(|b| b.as_bool()) {
+        let Some((is_supported, create)) = virtual_camera_api() else { bail!("{}", t!("err.vcam_unsupported")) };
+        let mut supported = BOOL(0);
+        if is_supported(MFVirtualCameraType_SoftwareCameraSource, &mut supported).is_err() || !supported.as_bool() {
             bail!("{}", t!("err.vcam_unsupported"));
         }
-        let camera = MFCreateVirtualCamera(
+        let (name, clsid) = (HSTRING::from(FRIENDLY_NAME), HSTRING::from(CLSID_STR));
+        let mut raw = std::ptr::null_mut();
+        create(
             MFVirtualCameraType_SoftwareCameraSource,
             MFVirtualCameraLifetime_Session,
             MFVirtualCameraAccess_CurrentUser,
-            &HSTRING::from(FRIENDLY_NAME),
-            &HSTRING::from(CLSID_STR),
-            None,
+            PCWSTR(name.as_ptr()),
+            PCWSTR(clsid.as_ptr()),
+            std::ptr::null(),
+            0,
+            &mut raw,
         )
+        .ok()
         .with_context(|| t!("err.vcam_create"))?;
+        let camera = IMFVirtualCamera::from_raw(raw);
         if let Err(e) = camera.Start(None) {
             let _ = camera.Remove();
             return Err(e).with_context(|| t!("err.vcam_create"));
