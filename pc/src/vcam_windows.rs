@@ -21,6 +21,7 @@ use rust_i18n::t;
 use std::sync::mpsc;
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
+use std::time::{Duration, Instant};
 use vcam_ipc::{CLSID_STR, FRAME_LEN, HEIGHT, WIDTH, Writer};
 use windows::Win32::Media::MediaFoundation::{
     IMFVirtualCamera, MF_VERSION, MFCreateVirtualCamera, MFIsVirtualCameraTypeSupported, MFSTARTUP_NOSOCKET, MFShutdown,
@@ -119,15 +120,12 @@ pub struct WindowsCamera {
 
 impl WindowsCamera {
     pub fn open() -> Result<Self> {
-        // Create the shared section up front so a failure (e.g. not running elevated) is reported here,
-        // then move the writer onto its own thread.
-        let writer = Writer::create().with_context(|| t!("err.vcam_open", path = r"Global\acam-vcam-video"))?;
-        // The camera second: until frames arrive the DLL shows its test pattern.
+        // The shared section is attached later, by the writer thread (see `writer_loop`).
         let host = Host::start()?;
         let mailbox = Arc::new(Mailbox { slot: Mutex::new(Slot::Empty), ready: Condvar::new() });
         let thread = {
             let mailbox = mailbox.clone();
-            std::thread::spawn(move || writer_loop(writer, &mailbox))
+            std::thread::spawn(move || writer_loop(&mailbox))
         };
         Ok(Self { i420: vec![0u8; FRAME_LEN], mailbox, writer: Some(thread), _host: host })
     }
@@ -158,7 +156,14 @@ impl Drop for WindowsCamera {
     }
 }
 
-fn writer_loop(mut writer: Writer, mailbox: &Mailbox) {
+/// Writes frames into the shared section once it can be attached. Without elevation that is only
+/// after the DLL has created it, i.e. once an app opens the camera — until then frames are dropped,
+/// which costs nothing since nobody is watching. Once attached the handle is kept, so the section
+/// outlives the app closing the camera and the next app gets frames at once.
+fn writer_loop(mailbox: &Mailbox) {
+    const RETRY: Duration = Duration::from_millis(200);
+    let mut writer: Option<Writer> = None;
+    let mut tried: Option<Instant> = None;
     loop {
         let frame = {
             let mut slot = mailbox.slot.lock().unwrap();
@@ -170,7 +175,13 @@ fn writer_loop(mut writer: Writer, mailbox: &Mailbox) {
                 }
             }
         };
-        writer.write(&frame);
+        if writer.is_none() && tried.is_none_or(|t| t.elapsed() >= RETRY) {
+            tried = Some(Instant::now());
+            writer = Writer::open().ok();
+        }
+        if let Some(w) = writer.as_mut() {
+            w.write(&frame);
+        }
     }
 }
 
@@ -261,5 +272,82 @@ mod tests {
         let listed = cameras();
         println!("cameras after drop: {listed:?}");
         assert!(!listed.iter().any(|n| n.starts_with(FRIENDLY_NAME)));
+    }
+
+    /// End to end without elevation: host the camera, open it like an app would (which makes the
+    /// Frame Server load the DLL, which creates the shared section), attach a `Writer` as a normal
+    /// user, and check a frame we write comes out of the camera. Needs the current DLL installed
+    /// (scripts/windows-vcam-register.ps1 -Register, or copy it over the registered one):
+    /// `cargo test --bin acam frames_reach_camera_without_admin -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn frames_reach_camera_without_admin() {
+        use windows::Win32::Media::MediaFoundation::{IMFMediaSource, MFCreateSourceReaderFromMediaSource};
+        // The Frame Server keeps the DLL (and its handle on the section) after a camera app closes, so
+        // only the first run after (re)installing the DLL shows the DLL creating the section.
+        if Writer::open().is_ok() {
+            println!("note: the section already exists (an earlier run, or acam elevated), so this run only checks attaching");
+        }
+        unsafe {
+            let _host = Host::start().unwrap();
+            let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
+            let mut attrs = None;
+            MFCreateAttributes(&mut attrs, 1).unwrap();
+            let attrs = attrs.unwrap();
+            attrs.SetGUID(&MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE, &MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_GUID).unwrap();
+            let (mut list, mut n) = (std::ptr::null_mut::<Option<IMFActivate>>(), 0u32);
+            MFEnumDeviceSources(&attrs, &mut list, &mut n).unwrap();
+            let activate = std::slice::from_raw_parts_mut(list, n as usize)
+                .iter_mut()
+                .filter_map(|a| a.take())
+                .find(|a| {
+                    let (mut s, mut len) = (windows::core::PWSTR::null(), 0);
+                    a.GetAllocatedString(&MF_DEVSOURCE_ATTRIBUTE_FRIENDLY_NAME, &mut s, &mut len).is_ok()
+                        && s.to_string().is_ok_and(|n| n.starts_with(FRIENDLY_NAME))
+                })
+                .expect("ACAM Camera not listed");
+            let source: IMFMediaSource = activate.ActivateObject().unwrap();
+            let reader = MFCreateSourceReaderFromMediaSource(&source, None).unwrap();
+            const FIRST_VIDEO_STREAM: u32 = 0xFFFF_FFFC;
+
+            // Reads frames until one's top-left luma is `want`, for up to ~3 s.
+            let wait_for = |want: Option<u8>| -> Option<u8> {
+                let mut last = None;
+                for _ in 0..90 {
+                    let (mut flags, mut ts, mut sample) = (0u32, 0i64, None);
+                    reader.ReadSample(FIRST_VIDEO_STREAM, 0, None, Some(&mut flags), Some(&mut ts), Some(&mut sample)).unwrap();
+                    let Some(sample) = sample else { continue };
+                    let buf = sample.ConvertToContiguousBuffer().unwrap();
+                    let mut p = std::ptr::null_mut();
+                    buf.Lock(&mut p, None, None).unwrap();
+                    last = Some(*p);
+                    buf.Unlock().unwrap();
+                    if want.is_none() || last == want {
+                        break;
+                    }
+                }
+                last
+            };
+            // The first sample makes the DLL create the section.
+            wait_for(None);
+
+            let mut writer = None;
+            for _ in 0..20 {
+                writer = Writer::open().ok();
+                if writer.is_some() {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            let mut writer = writer.expect("could not attach to the section the DLL should have created");
+            let mut frame = vec![128u8; FRAME_LEN];
+            frame[..WIDTH * HEIGHT].fill(200);
+            for _ in 0..3 {
+                writer.write(&frame);
+            }
+            assert_eq!(wait_for(Some(200)), Some(200), "our frame never came out of the camera");
+            println!("frame written by a non-elevated process came out of {FRIENDLY_NAME}");
+            let _ = source.Shutdown();
+        }
     }
 }

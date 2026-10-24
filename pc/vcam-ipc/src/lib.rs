@@ -5,9 +5,15 @@
 //! The transport is a **pagefile-backed `Global\` section** (not a disk-backed file): the frame is
 //! rewritten ~30x/s, and a disk-backed mapping's write-back saturates disk I/O and stalls the whole
 //! producer process (the decode/network loop backs up and latency climbs without bound). Pagefile
-//! backing lives in RAM. Creating a `Global\` section needs `SeCreateGlobalPrivilege`, so `acam.exe`
-//! must run elevated (Administrator); the Frame Server services (Local Service / Local System) then
-//! open it — a null DACL on the section grants them access across the session boundary.
+//! backing lives in RAM. It must be `Global\` because the Frame Server runs in session 0 while
+//! `acam.exe` runs in the user's session.
+//!
+//! Creating a `Global\` object needs `SeCreateGlobalPrivilege`, which services have and a normal
+//! (non-elevated) user process doesn't — but *opening* one needs no privilege. So whichever side
+//! comes first creates the section and the other opens it: in practice the DLL creates it when an app
+//! starts using the camera, and a non-elevated `acam.exe` keeps retrying [`Writer::open`] until it
+//! exists. (An elevated `acam.exe` can still create it itself.) The section's DACL lets the Frame
+//! Server accounts, administrators and interactive users read and write it.
 //!
 //! One writer, one-or-more readers, lock-free via a seqlock: the writer bumps a sequence counter to
 //! odd before touching the frame and to even after, and a reader retries until it reads the same even
@@ -38,17 +44,12 @@ mod imp {
     use super::{FRAME_LEN, HEIGHT, WIDTH, now_ns};
     use core::ffi::c_void;
     use std::sync::atomic::{AtomicU64, Ordering};
-    use windows::Win32::Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE};
-    use windows::Win32::Security::{
-        InitializeSecurityDescriptor, PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES, SECURITY_DESCRIPTOR,
-        SetSecurityDescriptorDacl,
-    };
-
-    /// `SECURITY_DESCRIPTOR_REVISION` from the Windows SDK (not re-exported by this `windows` feature set).
-    const SECURITY_DESCRIPTOR_REVISION: u32 = 1;
+    use windows::Win32::Foundation::{CloseHandle, HANDLE, HLOCAL, INVALID_HANDLE_VALUE, LocalFree};
+    use windows::Win32::Security::Authorization::{ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1};
+    use windows::Win32::Security::{PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES};
     use windows::Win32::System::Memory::{
-        CreateFileMappingW, FILE_MAP_READ, FILE_MAP_WRITE, MEMORY_MAPPED_VIEW_ADDRESS, MapViewOfFile,
-        OpenFileMappingW, PAGE_READWRITE, UnmapViewOfFile,
+        CreateFileMappingW, FILE_MAP_READ, FILE_MAP_WRITE, MEMORY_MAPPED_VIEW_ADDRESS, MapViewOfFile, OpenFileMappingW,
+        PAGE_READWRITE, UnmapViewOfFile,
     };
     use windows::core::w;
 
@@ -88,71 +89,53 @@ mod imp {
         std::io::Error::other(e.to_string())
     }
 
-    /// The frame producer, held by `acam.exe` for the lifetime of a virtual-camera session.
-    pub struct Writer {
+    /// A mapped view of the section, read-write for both sides (the reader may be the one that
+    /// creates it and must write the header).
+    struct Section {
         handle: HANDLE,
         ptr: *mut u8,
     }
 
-    // SAFETY: `ptr`/`handle` refer to a process-wide-valid shared section; the Writer has a single
-    // logical owner (it is moved onto a dedicated writer thread in acam) so there is no aliasing.
-    unsafe impl Send for Writer {}
-
-    impl Writer {
-        /// Creates the `Global\` section and writes the header. The frame starts all-black so a reader
-        /// that attaches before the first real frame shows black, not garbage. Fails (e.g. access
-        /// denied) when not running elevated — creating a `Global\` object needs that privilege.
-        pub fn create() -> std::io::Result<Self> {
-            // Null DACL: grant every account (incl. the Frame Server services in session 0) access.
-            let mut sd = SECURITY_DESCRIPTOR::default();
-            let psd = PSECURITY_DESCRIPTOR(&mut sd as *mut _ as *mut c_void);
-            unsafe {
-                InitializeSecurityDescriptor(psd, SECURITY_DESCRIPTOR_REVISION).map_err(io_err)?;
-                SetSecurityDescriptorDacl(psd, true, None, false).map_err(io_err)?;
-            }
-            let sa = SECURITY_ATTRIBUTES {
-                nLength: size_of::<SECURITY_ATTRIBUTES>() as u32,
-                lpSecurityDescriptor: psd.0,
-                bInheritHandle: false.into(),
+    impl Section {
+        /// Opens the section, or creates it if it doesn't exist yet and this process may create
+        /// `Global\` objects. A fresh (all-zero) section gets its header and a black frame.
+        fn attach() -> std::io::Result<Self> {
+            let name = w!("Global\\acam-vcam-video");
+            let access = FILE_MAP_READ | FILE_MAP_WRITE;
+            let handle = match unsafe { OpenFileMappingW(access.0, false, name) } {
+                Ok(h) => h,
+                Err(_) => create(name)?,
             };
-            let handle = unsafe {
-                CreateFileMappingW(INVALID_HANDLE_VALUE, Some(&sa), PAGE_READWRITE, 0, SECTION_LEN as u32, w!("Global\\acam-vcam-video"))
-            }
-            .map_err(io_err)?;
-            let view = unsafe { MapViewOfFile(handle, FILE_MAP_WRITE, 0, 0, SECTION_LEN) };
+            let view = unsafe { MapViewOfFile(handle, access, 0, 0, SECTION_LEN) };
             if view.Value.is_null() {
+                let e = std::io::Error::last_os_error();
                 unsafe { let _ = CloseHandle(handle); }
-                return Err(std::io::Error::other("MapViewOfFile (write) returned null"));
+                return Err(e);
             }
-            let ptr = view.Value as *mut u8;
-            let buf = unsafe { std::slice::from_raw_parts_mut(ptr, SECTION_LEN) };
-            write_u32(buf, 0, MAGIC);
-            write_u32(buf, 4, WIDTH as u32);
-            write_u32(buf, 8, HEIGHT as u32);
-            write_u32(buf, 12, FORMAT_NV12);
-            write_u32(buf, 16, FRAME_LEN as u32);
-            // seq starts at 0 (no frame yet); fill the frame with black NV12 (Y=16, UV=128).
-            let (y, uv) = buf[FRAME_OFFSET..].split_at_mut(WIDTH * HEIGHT);
-            y.fill(16);
-            uv.fill(128);
-            Ok(Self { handle, ptr })
+            let s = Self { handle, ptr: view.Value as *mut u8 };
+            let buf = unsafe { std::slice::from_raw_parts_mut(s.ptr, SECTION_LEN) };
+            if read_u32(buf, 0) != MAGIC {
+                // Fresh section. Two sides attaching at once both write the same values; the seq
+                // counter is left alone (0 = no frame yet). Magic goes last so nobody skips this
+                // while it is half done.
+                write_u32(buf, 4, WIDTH as u32);
+                write_u32(buf, 8, HEIGHT as u32);
+                write_u32(buf, 12, FORMAT_NV12);
+                write_u32(buf, 16, FRAME_LEN as u32);
+                let (y, uv) = buf[FRAME_OFFSET..].split_at_mut(WIDTH * HEIGHT);
+                y.fill(16);
+                uv.fill(128);
+                write_u32(buf, 0, MAGIC);
+            }
+            Ok(s)
         }
 
-        /// Publishes one NV12 frame (must be exactly [`FRAME_LEN`] bytes) tear-free, stamped with the
-        /// current wall-clock time so the reader can measure how old the frame is when it serves it.
-        pub fn write(&mut self, nv12: &[u8]) {
-            assert_eq!(nv12.len(), FRAME_LEN);
-            let buf = unsafe { std::slice::from_raw_parts_mut(self.ptr, SECTION_LEN) };
-            let s = unsafe { seq(self.ptr) };
-            let begin = s.load(Ordering::Relaxed);
-            s.store(begin.wrapping_add(1), Ordering::Release); // odd: write in progress
-            buf[FRAME_OFFSET..FRAME_OFFSET + FRAME_LEN].copy_from_slice(nv12);
-            write_u64(buf, TS_OFFSET, now_ns());
-            s.store(begin.wrapping_add(2), Ordering::Release); // even: frame complete
+        fn buf(&self) -> &mut [u8] {
+            unsafe { std::slice::from_raw_parts_mut(self.ptr, SECTION_LEN) }
         }
     }
 
-    impl Drop for Writer {
+    impl Drop for Section {
         fn drop(&mut self) {
             unsafe {
                 let _ = UnmapViewOfFile(MEMORY_MAPPED_VIEW_ADDRESS { Value: self.ptr as *mut c_void });
@@ -161,10 +144,63 @@ mod imp {
         }
     }
 
-    /// The frame consumer, held by the `vcam-source` DLL. Attaches to an already-created section.
+    /// Creates the section with a DACL that lets both sides in: SYSTEM and Local Service (the Frame
+    /// Server and Frame Server Monitor services), administrators, and interactive users (`acam.exe`,
+    /// not elevated). Fails with access denied without `SeCreateGlobalPrivilege`.
+    fn create(name: windows::core::PCWSTR) -> std::io::Result<HANDLE> {
+        let mut psd = PSECURITY_DESCRIPTOR::default();
+        unsafe {
+            ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                w!("D:P(A;;GA;;;SY)(A;;GA;;;LS)(A;;GA;;;BA)(A;;GRGW;;;IU)"),
+                SDDL_REVISION_1,
+                &mut psd,
+                None,
+            )
+            .map_err(io_err)?;
+        }
+        let sa = SECURITY_ATTRIBUTES {
+            nLength: size_of::<SECURITY_ATTRIBUTES>() as u32,
+            lpSecurityDescriptor: psd.0,
+            bInheritHandle: false.into(),
+        };
+        let handle = unsafe { CreateFileMappingW(INVALID_HANDLE_VALUE, Some(&sa), PAGE_READWRITE, 0, SECTION_LEN as u32, name) };
+        unsafe { LocalFree(Some(HLOCAL(psd.0))) };
+        handle.map_err(io_err)
+    }
+
+    /// The frame producer, held by `acam.exe` for the lifetime of a virtual-camera session.
+    pub struct Writer {
+        section: Section,
+    }
+
+    // SAFETY: the section is process-wide valid; the Writer has a single logical owner (it is moved
+    // onto a dedicated writer thread in acam) so there is no aliasing.
+    unsafe impl Send for Writer {}
+
+    impl Writer {
+        /// Attaches to the section. Without elevation this only succeeds once the DLL has created it
+        /// (i.e. an app is using the camera), so callers retry.
+        pub fn open() -> std::io::Result<Self> {
+            Ok(Self { section: Section::attach()? })
+        }
+
+        /// Publishes one NV12 frame (must be exactly [`FRAME_LEN`] bytes) tear-free, stamped with the
+        /// current wall-clock time so the reader can measure how old the frame is when it serves it.
+        pub fn write(&mut self, nv12: &[u8]) {
+            assert_eq!(nv12.len(), FRAME_LEN);
+            let buf = self.section.buf();
+            let s = unsafe { seq(self.section.ptr) };
+            let begin = s.load(Ordering::Relaxed);
+            s.store(begin.wrapping_add(1), Ordering::Release); // odd: write in progress
+            buf[FRAME_OFFSET..FRAME_OFFSET + FRAME_LEN].copy_from_slice(nv12);
+            write_u64(buf, TS_OFFSET, now_ns());
+            s.store(begin.wrapping_add(2), Ordering::Release); // even: frame complete
+        }
+    }
+
+    /// The frame consumer, held by the `vcam-source` DLL.
     pub struct Reader {
-        handle: HANDLE,
-        ptr: *const u8,
+        section: Section,
     }
 
     // SAFETY: the section is process-wide valid; the Reader has a single logical owner (it lives
@@ -172,25 +208,10 @@ mod imp {
     unsafe impl Send for Reader {}
 
     impl Reader {
-        /// Opens the section if the producer has created it (correct magic), else `None` — the DLL
-        /// retries on the next sample request, so a not-yet-running `acam.exe` just means no frame.
+        /// Attaches to the section, creating it if needed (the Frame Server may create `Global\`
+        /// objects). `None` on failure — the DLL retries on the next sample request.
         pub fn open() -> Option<Self> {
-            let handle = unsafe { OpenFileMappingW(FILE_MAP_READ.0, false, w!("Global\\acam-vcam-video")) }.ok()?;
-            let view = unsafe { MapViewOfFile(handle, FILE_MAP_READ, 0, 0, SECTION_LEN) };
-            if view.Value.is_null() {
-                unsafe { let _ = CloseHandle(handle); }
-                return None;
-            }
-            let ptr = view.Value as *const u8;
-            let buf = unsafe { std::slice::from_raw_parts(ptr, SECTION_LEN) };
-            if read_u32(buf, 0) != MAGIC {
-                unsafe {
-                    let _ = UnmapViewOfFile(MEMORY_MAPPED_VIEW_ADDRESS { Value: ptr as *mut c_void });
-                    let _ = CloseHandle(handle);
-                }
-                return None;
-            }
-            Some(Self { handle, ptr })
+            Section::attach().ok().map(|section| Self { section })
         }
 
         /// Copies the latest complete frame into `out` (must be [`FRAME_LEN`]) and returns the
@@ -198,8 +219,8 @@ mod imp {
         /// yet or a stable read could not be obtained in a few tries (writer too busy).
         pub fn read(&self, out: &mut [u8]) -> Option<u64> {
             assert_eq!(out.len(), FRAME_LEN);
-            let buf = unsafe { std::slice::from_raw_parts(self.ptr, SECTION_LEN) };
-            let s = unsafe { seq(self.ptr) };
+            let buf = self.section.buf();
+            let s = unsafe { seq(self.section.ptr) };
             for _ in 0..8 {
                 let s1 = s.load(Ordering::Acquire);
                 if s1 == 0 || s1 & 1 == 1 {
@@ -217,12 +238,21 @@ mod imp {
         }
     }
 
-    impl Drop for Reader {
-        fn drop(&mut self) {
-            unsafe {
-                let _ = UnmapViewOfFile(MEMORY_MAPPED_VIEW_ADDRESS { Value: self.ptr as *mut c_void });
-                let _ = CloseHandle(self.handle);
-            }
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        /// In one (non-service) process: whoever can, creates; a frame written is read back. Run
+        /// elevated, or while an app is using the camera, or it is skipped.
+        #[test]
+        fn writer_to_reader() {
+            let Ok(mut w) = Writer::open() else { return eprintln!("skipped: cannot create Global\\ section") };
+            let r = Reader::open().unwrap();
+            let frame: Vec<u8> = (0..FRAME_LEN).map(|i| (i % 251) as u8).collect();
+            w.write(&frame);
+            let mut out = vec![0u8; FRAME_LEN];
+            r.read(&mut out).unwrap();
+            assert!(out == frame);
         }
     }
 }
@@ -235,7 +265,7 @@ mod imp {
     pub struct Reader;
 
     impl Writer {
-        pub fn create() -> std::io::Result<Self> {
+        pub fn open() -> std::io::Result<Self> {
             unreachable!("vcam-ipc is Windows-only")
         }
         pub fn write(&mut self, _nv12: &[u8]) {

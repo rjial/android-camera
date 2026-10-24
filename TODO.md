@@ -34,7 +34,11 @@ What works on the branch:
 - [x] Virtual webcam (Windows 11): `MFCreateVirtualCamera` with our own COM media source DLL
       (`pc/vcam-source`), registered via `scripts/windows-vcam-register.ps1`. Shows up and streams.
 - [x] Real frames producer→DLL over `pc/vcam-ipc` (pagefile-backed `Global\` shared-memory section, seqlock,
-      fixed 1280x720 NV12). `acam.exe` must run **elevated** to create the `Global\` section.
+      fixed 1280x720 NV12). **No elevation needed:** the DLL (in the Frame Server, which has
+      `SeCreateGlobalPrivilege`) creates the section when an app opens the camera, with a DACL that lets
+      interactive users write; a normal `acam.exe` keeps retrying to attach (every 200 ms) and then keeps its
+      handle. Verified by `frames_reach_camera_without_admin` (ignored test in `vcam_windows.rs`). Only the
+      one-time DLL registration (`regsvr32`, HKLM) still needs Administrator.
 - [x] USB: `acam --adb` (and the GUI's ADB tab) runs `adb forward tcp:5000 tcp:5000` itself on every
       (re)connect and tunnels acam's existing TCP over the cable (scrcpy's approach — no AOA driver needed;
       `pc/src/adb.rs`). An AOA WinUSB INF is in `pc/accessory-driver/` as an alternative, but AOA-direct on
@@ -59,9 +63,6 @@ Still to do:
       frames on the GPU. Still worth adding drop-stale-frames to the engine so latency stays bounded on
       hardware without a usable GPU decoder.
 - [ ] Remove the temporary debug instrumentation before merging the branch.
-- [ ] Avoid the elevation requirement: let the DLL (runs in the Frame Server, which has
-      `SeCreateGlobalPrivilege`) create the shared section and have non-elevated `acam` open it; or use a named
-      pipe (`\\.\pipe\acam-video`, no privilege needed). Right now `acam` must be Administrator.
 - [ ] Windows 10 has no `MFCreateVirtualCamera` (acam reports it and points at the OBS plugin). A DirectShow
       source filter (what `dimalinau-lab/Virtual-Camera` does) would cover Win10 and DirectShow-only apps, at
       the cost of not showing in the Windows Camera app — only if Win10 users ask.

@@ -87,7 +87,6 @@ err.v4l2_not_loopback: "%{path} bukan perangkat v4l2loopback (driver: %{driver})
 err.v4l2_format: "%{path}: VIDIOC_S_FMT %{width}x%{height} gagal: %{error}"
 err.v4l2_write: "write ke v4l2loopback gagal"
 err.webcam_unsupported: "output webcam virtual belum diimplementasikan di platform ini"
-err.vcam_open: "gagal membuka shared memory kamera virtual di %{path}"
 err.vcam_unsupported: "Windows ini tidak punya API kamera virtual (perlu Windows 11 build 22000+); di Windows 10 pakai plugin OBS"
 err.vcam_create: "gagal membuat kamera virtual ACAM. Apakah DLL-nya sudah terdaftar? Jalankan scripts\\windows-vcam-register.ps1 -Register sebagai Administrator"
 

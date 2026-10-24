@@ -90,7 +90,6 @@ err.v4l2_not_loopback: "%{path} is not a v4l2loopback device (driver: %{driver})
 err.v4l2_format: "%{path}: VIDIOC_S_FMT %{width}x%{height} failed: %{error}"
 err.v4l2_write: "write to v4l2loopback failed"
 err.webcam_unsupported: "virtual webcam output is not implemented on this platform yet"
-err.vcam_open: "failed to open the virtual camera shared memory at %{path}"
 err.vcam_unsupported: "this Windows has no virtual camera API (Windows 11 build 22000+ is needed); on Windows 10 use the OBS plugin"
 err.vcam_create: "could not create the ACAM virtual camera. Is its DLL registered? Run scripts\\windows-vcam-register.ps1 -Register as Administrator"
 
